@@ -155,9 +155,14 @@ public enum ZcashSDK {
     /// The theoretical maximum number of blocks in a reorg, due to other bottlenecks in the protocol design.
     public static let maxReorgSize = 100
 
-    /// The amount of blocks ahead of the current height where new transactions are set to expire. This value is controlled
-    /// by the rust backend but it is helpful to know what it is set to and should be kept in sync.
-    public static let expiryOffset = 20
+    /// The number of blocks after its target height at which a transaction built without an explicit expiry expires,
+    /// before NU7 activation.
+    ///
+    /// The rust backend applies the default for the consensus branch at the transaction's target height: 40 blocks
+    /// from Blossom until NU7, and 120 blocks from NU7 activation. No single constant is correct on both sides of
+    /// activation, so use ``ZcashNetwork/defaultExpiryDelta(atTargetHeight:)`` instead.
+    @available(*, deprecated, message: "The default expiry delta depends on the height; use ZcashNetwork.defaultExpiryDelta(atTargetHeight:).")
+    public static let expiryOffset = 40
 
     // MARK: Defaults
 
@@ -167,9 +172,22 @@ public enum ZcashSDK {
     /// Default batch size for enhancing transactions for the compact block processor
     public static let DefaultEnhanceBatch = 1000
 
-    /// Default amount of time, in in seconds, to poll for new blocks. Typically, this should be about half the average
-    /// block time.
+    /// The longest default interval, in seconds, between polls for new blocks. Each poll waits a random time between
+    /// half and one and a half times the interval.
+    ///
+    /// The SDK polls at this interval while the target block spacing is 75 seconds. From NU7 activation the spacing is
+    /// 25 seconds and the SDK polls at half the spacing instead (see ``pollInterval(targetBlockSpacing:)``).
     public static let defaultPollInterval: TimeInterval = 20
+
+    /// The interval, in seconds, between polls for new blocks when the chain's target block spacing is
+    /// `targetBlockSpacing`: half the spacing, capped at ``defaultPollInterval``. `nil` (spacing unknown) gives
+    /// ``defaultPollInterval``.
+    static func pollInterval(targetBlockSpacing: TimeInterval?) -> TimeInterval {
+        guard let targetBlockSpacing, targetBlockSpacing > 0 else {
+            return defaultPollInterval
+        }
+        return min(defaultPollInterval, targetBlockSpacing / 2)
+    }
 
     /// Default attempts at retrying.
     // This has been tweaked in https://github.com/zcash/ZcashLightClientKit/issues/1303

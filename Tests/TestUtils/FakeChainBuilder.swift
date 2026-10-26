@@ -13,6 +13,10 @@ enum FakeChainBuilderError: Error {
 }
 
 enum FakeChainBuilder {
+    /// The distance, in blocks, from the activation height at which the canopy fixtures stage
+    /// their transactions.
+    static let stagingOffset = 20
+
     static let someOtherTxUrl = "https://raw.githubusercontent.com/zcash-hackworks/darksidewalletd-test-data/master/transactions/t-shielded-spend.txt"
     static let txMainnetBlockUrl = "https://raw.githubusercontent.com/zcash-hackworks/darksidewalletd-test-data/master/basic-reorg/663150.txt"
 
@@ -161,7 +165,7 @@ enum FakeChainBuilder {
 
         try darksideWallet.useDataset(testnetCanopyStartBlock)
         try darksideWallet.stageBlocksCreate(from: birthday + 1, count: length)
-        try darksideWallet.stageTransaction(from: testnetPreCanopyTx, at: networkActivationHeight - ZcashSDK.expiryOffset)
+        try darksideWallet.stageTransaction(from: testnetPreCanopyTx, at: networkActivationHeight - stagingOffset)
     }
 
     static func buildChainPostActivationFunds(darksideWallet: DarksideWalletService, birthday: BlockHeight, startSaplingTreeSize: UInt32, startOrchardTreeSize: UInt32, networkActivationHeight: BlockHeight, length: Int) throws {
@@ -199,7 +203,7 @@ enum FakeChainBuilder {
             length: length
         )
 
-        try darksideWallet.stageTransaction(from: testnetPostCanopyTx, at: networkActivationHeight + ZcashSDK.expiryOffset)
+        try darksideWallet.stageTransaction(from: testnetPostCanopyTx, at: networkActivationHeight + stagingOffset)
     }
 
     static func buildTxUrl(for id: String) -> String {

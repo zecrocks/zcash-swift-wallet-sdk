@@ -72,8 +72,11 @@ actor CompactBlockProcessor {
         let network: ZcashNetwork
         let saplingActivation: BlockHeight
         let cacheDbURL: URL?
-        var blockPollInterval: TimeInterval {
-            TimeInterval.random(in: ZcashSDK.defaultPollInterval / 2 ... ZcashSDK.defaultPollInterval * 1.5)
+        /// A randomized interval before the next poll for new blocks when the chain tip is at `chainTip`, scaled to the
+        /// target spacing of the next block so that polling keeps pace after NU7 shortens it.
+        func blockPollInterval(chainTip: BlockHeight) -> TimeInterval {
+            let interval = ZcashSDK.pollInterval(targetBlockSpacing: network.targetBlockSpacing(at: chainTip + 1))
+            return TimeInterval.random(in: interval / 2 ... interval * 1.5)
         }
 
         init(
@@ -844,7 +847,7 @@ extension CompactBlockProcessor {
 
 extension CompactBlockProcessor {
     private func setTimer() async {
-        let interval = config.blockPollInterval
+        let interval = config.blockPollInterval(chainTip: await latestBlocksDataProvider.latestBlockHeight)
         self.backoffTimer?.invalidate()
         let timer = Timer(
             timeInterval: interval,

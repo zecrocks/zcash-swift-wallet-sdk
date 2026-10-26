@@ -16,6 +16,12 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `NetworkActivationHeights.init`, defaulting to `nil` (NU7 not activated). Set it to the
   `nuparams` NU7 height of a custom or regtest node that activates NU7.
   `NetworkActivationHeights.allActiveFromGenesis` leaves `nu7` unset.
+- `ZcashNetwork.targetBlockSpacing(at:)` returns the target time between a block and its parent
+  (75 seconds from Blossom until NU7, 25 seconds from NU7 activation), and
+  `ZcashNetwork.defaultExpiryDelta(atTargetHeight:)` the number of blocks after its target height at
+  which a transaction built without an explicit expiry expires (40 until NU7, 120 from NU7
+  activation). Both return `nil` for a custom network before an `Initializer` has been created
+  for it. Use them instead of fixed 75-second or 40-block assumptions.
 
 ## Changed
 
@@ -33,6 +39,18 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Orchard-to-Ironwood migration schedule's `estimatedDurationHours` now measures blocks at or
   after NU7 activation at the 25-second spacing; it previously assumed 75 seconds per block, so
   estimates spanning NU7 were up to three times too long.
+- `ZcashSDK.expiryOffset` is deprecated, because no single value is the default expiry delta on
+  both sides of NU7 activation; use `ZcashNetwork.defaultExpiryDelta(atTargetHeight:)`. Its value
+  changes from 20 to 40, the default before NU7 (it had not matched the Rust backend's default
+  since Blossom).
+- From NU7 activation the synchronizer polls for new blocks at half the 25-second block spacing
+  (between about 6 and 19 seconds) instead of between 10 and 30 seconds, so a wallet keeps up with
+  the faster chain. `ZcashSDK.defaultPollInterval` is unchanged and still applies before NU7.
+- `Synchronizer.estimatedMigrationSecondsPerBlock()` falls back to the network's target spacing at
+  the latest scanned height when it cannot measure a rate (75 seconds before NU7, 25 seconds from
+  it) instead of a fixed 75 seconds, and to 25 seconds on mainnet and testnet when nothing has
+  been scanned. The wall-clock chain-tip estimate behind the migration's `estimatedTip` inputs uses
+  the same fallback.
 
 ## Removed
 
@@ -52,6 +70,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reporting the NU6.3 branch ID, so a server past NU7 that omitted Ironwood data was accepted and
   the wallet silently missed Ironwood-pool activity. Such a server is now rejected with
   `ZcashError.compactBlockProcessorServerMissingIronwoodSupport`.
+- `Synchronizer.rewind(_:)` with `RewindPolicy.transaction(_:)` for an unmined transaction rewinds
+  to before the height the transaction was built for, using the default expiry delta in effect at
+  that height (40 blocks before NU7, 120 from NU7 activation). It previously assumed 20 blocks,
+  which left the rewind too shallow to cover the transaction's target height.
 
 # 4.0.0 - 2026-10-19
 

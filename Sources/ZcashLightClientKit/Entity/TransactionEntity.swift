@@ -325,7 +325,11 @@ extension ZcashTransaction.Overview {
 
         guard let expiryHeight = self.expiryHeight else { return nil }
         if expiryHeight != -1 {
-            return max(expiryHeight - ZcashSDK.expiryOffset - ZcashSDK.defaultStaleTolerance, network.saplingActivationHeight)
+            // An unmined transaction was built for the target height its expiry was counted from,
+            // and the default expiry delta grows at NU7 activation (40 to 120 blocks), so the delta
+            // is recovered per height rather than assumed.
+            let expiryDelta = network.estimatedDefaultExpiryDelta(forExpiryHeight: expiryHeight)
+            return max(expiryHeight - expiryDelta - ZcashSDK.defaultStaleTolerance, network.saplingActivationHeight)
         }
 
         return nil

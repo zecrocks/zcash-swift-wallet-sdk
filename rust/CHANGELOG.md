@@ -15,6 +15,12 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from NU7 activation onward expire 120 blocks after their target height instead of 40.
 - `voting` Cargo feature (off by default) gating the shielded-voting module. In the generated
   `zcashlc.h` the voting declarations sit inside `#if defined(ZCASHLC_VOTING)`.
+- `zcashlc_target_block_spacing(height, network_id)` returns the target spacing in seconds between
+  the block at `height` and its parent (150 before Blossom, 75 until NU7, 25 from NU7 activation),
+  and `zcashlc_default_tx_expiry_delta(target_height, network_id)` the default expiry delta in
+  blocks for a transaction built for `target_height` (40 until NU7, 120 from NU7 activation). Both
+  return `-1` with the last error set when the network is invalid or a custom network has not
+  been configured.
 
 - `zcashlc_take_last_error_report` returns the most recent error as an `ErrorReport` (an
   `ErrorKind` discriminant, a redacted message that carries no amount, address, note identifier
@@ -226,6 +232,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   itself never touches.
 
 ### Changed
+- `zcashlc_tor_lwd_conn_check_single_use_taddr` considers ephemeral addresses exposed within one
+  day of target block time before the chain tip, measured per height, instead of within a fixed
+  1152 blocks, and schedules the next check of an address using the target spacing after the tip
+  instead of a fixed 75 seconds per block. From NU7 activation a day spans 3456 blocks.
 - The `zcashlc_voting_*` FFI is compiled again, against the Ironwood (NU6.3)
   dependency stack. It had been gated behind `#[cfg(zcash_voting)]` on the
   grounds that `zcash_voting` could not resolve against the Ironwood `orchard`
