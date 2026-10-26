@@ -15,6 +15,9 @@ final class ValidateServerActionTests: ZcashTestCase {
     var underlyingNetwork: ZcashNetwork?
     var underlyingSaplingActivationHeight: BlockHeight?
     var underlyingConsensusBranchID = ""
+    var underlyingBlockHeight: UInt64 = 2
+    var underlyingLocalBranchID: ConsensusBranchID = -1026109260
+    var underlyingIronwoodTree = ""
 
     override func setUp() {
         super.setUp()
@@ -24,6 +27,9 @@ final class ValidateServerActionTests: ZcashTestCase {
         underlyingNetwork = nil
         underlyingSaplingActivationHeight = nil
         underlyingConsensusBranchID = "c2d6d0b4"
+        underlyingBlockHeight = 2
+        underlyingLocalBranchID = -1026109260
+        underlyingIronwoodTree = ""
     }
 
     func testValidateServerAction_NextAction() async throws {
@@ -181,26 +187,121 @@ final class ValidateServerActionTests: ZcashTestCase {
         }
     }
 
-    private func setupAction() -> ValidateServerAction {
+    // MARK: - Ironwood support probe
+
+    /// Testnet NU6.3 (Ironwood) activation height, from `zcash_protocol`.
+    private let testnetNU63Height: UInt64 = 4_134_000
+    /// Testnet NU7 activation height, from `zcash_protocol`.
+    private let testnetNU7Height: UInt64 = 4_465_026
+
+    func testRequiresIronwoodSupport_FromNU63ActivationOnward() {
+        let testnet = ZcashNetworkBuilder.network(for: .testnet)
+
+        XCTAssertFalse(
+            ValidateServerAction.requiresIronwoodSupport(serverTipHeight: BlockHeight(testnetNU63Height) - 1, network: testnet)
+        )
+        XCTAssertTrue(
+            ValidateServerAction.requiresIronwoodSupport(serverTipHeight: BlockHeight(testnetNU63Height), network: testnet)
+        )
+        XCTAssertTrue(
+            ValidateServerAction.requiresIronwoodSupport(serverTipHeight: BlockHeight(testnetNU7Height), network: testnet)
+        )
+        XCTAssertTrue(
+            ValidateServerAction.requiresIronwoodSupport(serverTipHeight: BlockHeight(testnetNU7Height) + 1_000_000, network: testnet)
+        )
+    }
+
+    func testRequiresIronwoodSupport_FalseForCustomNetwork() {
+        let regtest = ZcashNetworkBuilder.regtest(
+            activationHeights: NetworkActivationHeights(sapling: 1, nu5: 1, nu6: 1, nu6_3: 1, nu7: 1)
+        )
+
+        XCTAssertFalse(ValidateServerAction.requiresIronwoodSupport(serverTipHeight: 1_000, network: regtest))
+    }
+
+    func testValidateServerAction_PreNU63ServerIsNotProbedForIronwood() async throws {
+        let serviceMock = LightWalletServiceMock()
+        let validateServerAction = setupAction(serviceMock: serviceMock)
+
+        _ = try await validateServerAction.run(with: ActionContextMock.default()) { _ in }
+
+        XCTAssertFalse(serviceMock.getTreeStateModeCalled)
+    }
+
+    func testValidateServerAction_NU63ServerMissingIronwoodFails() async throws {
+        underlyingBlockHeight = testnetNU63Height
+        underlyingLocalBranchID = ZcashSDK.nu63ConsensusBranchID
+        underlyingConsensusBranchID = "37a5165b"
+        underlyingIronwoodTree = ""
+
+        try await assertMissingIronwoodSupport()
+    }
+
+    func testValidateServerAction_NU7ServerMissingIronwoodFails() async throws {
+        underlyingBlockHeight = testnetNU7Height
+        underlyingLocalBranchID = ZcashSDK.nu7ConsensusBranchID
+        underlyingConsensusBranchID = "77190ad9"
+        underlyingIronwoodTree = ""
+
+        try await assertMissingIronwoodSupport()
+    }
+
+    func testValidateServerAction_NU7ServerWithIronwoodPasses() async throws {
+        underlyingBlockHeight = testnetNU7Height
+        underlyingLocalBranchID = ZcashSDK.nu7ConsensusBranchID
+        underlyingConsensusBranchID = "77190ad9"
+        underlyingIronwoodTree = "01"
+
+        let serviceMock = LightWalletServiceMock()
+        let validateServerAction = setupAction(serviceMock: serviceMock)
+
+        let nextContext = try await validateServerAction.run(with: ActionContextMock.default()) { _ in }
+
+        let acResult = nextContext.checkStateIs(.fetchUTXO)
+        XCTAssertTrue(acResult == .true, "Check of state failed with '\(acResult)'")
+        XCTAssertEqual(serviceMock.getTreeStateModeReceivedArguments?.id.height, testnetNU7Height)
+    }
+
+    private func assertMissingIronwoodSupport(file: StaticString = #filePath, line: UInt = #line) async throws {
+        let validateServerAction = setupAction()
+
+        do {
+            _ = try await validateServerAction.run(with: ActionContextMock()) { _ in }
+            XCTFail("A server without Ironwood support is expected to fail validation.", file: file, line: line)
+        } catch ZcashError.compactBlockProcessorServerMissingIronwoodSupport {
+        } catch {
+            XCTFail(
+                "Expected ZcashError.compactBlockProcessorServerMissingIronwoodSupport, got \(error)",
+                file: file,
+                line: line
+            )
+        }
+    }
+
+    private func setupAction(serviceMock: LightWalletServiceMock = LightWalletServiceMock()) -> ValidateServerAction {
         let network = underlyingNetwork ?? ZcashNetworkBuilder.network(for: underlyingNetworkType)
         let config: CompactBlockProcessor.Configuration = .standard(
             for: network, walletBirthday: 0
         )
 
         let rustBackendMock = ZcashRustBackendWeldingMock()
+        let expectedHeight = Int32(underlyingBlockHeight)
+        let localBranchID = underlyingLocalBranchID
         rustBackendMock.consensusBranchIdForHeightClosure = { height in
-            XCTAssertEqual(height, 2, "")
-            return -1026109260
+            XCTAssertEqual(height, expectedHeight, "")
+            return localBranchID
         }
 
         let lightWalletdInfoMock = LightWalletdInfoMock()
         lightWalletdInfoMock.underlyingConsensusBranchID = underlyingConsensusBranchID
         lightWalletdInfoMock.underlyingSaplingActivationHeight = UInt64(underlyingSaplingActivationHeight ?? config.saplingActivation)
-        lightWalletdInfoMock.underlyingBlockHeight = 2
+        lightWalletdInfoMock.underlyingBlockHeight = underlyingBlockHeight
         lightWalletdInfoMock.underlyingChainName = underlyingChainName
 
-        let serviceMock = LightWalletServiceMock()
         serviceMock.getInfoModeReturnValue = lightWalletdInfoMock
+        var treeState = TreeState()
+        treeState.ironwoodTree = underlyingIronwoodTree
+        serviceMock.getTreeStateModeReturnValue = treeState
 
         mockContainer.mock(type: ZcashRustBackendWelding.self, isSingleton: true) { _ in rustBackendMock }
         mockContainer.mock(type: LightWalletService.self, isSingleton: true) { _ in serviceMock }

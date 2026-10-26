@@ -76,9 +76,14 @@ extension ValidateServerAction: Action {
             // the server's tip is the discriminating block-level signal: an Ironwood-capable server
             // always serves a non-empty `ironwoodTree` frontier once the pool exists.
             //
-            // A custom network reports a nonstandard branch id that can never equal the NU6.3 one, so
+            // The probe keys on the server's tip height rather than on its branch id, because the
+            // Ironwood pool persists through every later upgrade: a server past NU7 (or any upgrade
+            // after it) must serve Ironwood data just as an NU6.3 server must. The branch id has
+            // already been checked against the local consensus rules for that height above.
+            //
+            // A custom network reports a nonstandard branch id and carries no fixed NU6.3 height, so
             // this probe belongs with the other branch-id-derived checks it is gated behind.
-            if remoteBranchID == ZcashSDK.nu63ConsensusBranchID {
+            if Self.requiresIronwoodSupport(serverTipHeight: BlockHeight(info.blockHeight), network: localNetwork) {
                 var tipBlock = BlockID()
                 tipBlock.height = info.blockHeight
                 let treeState = try await service.getTreeState(tipBlock, mode: await sdkFlags.ifTor(.defaultTor))
@@ -93,4 +98,16 @@ extension ValidateServerAction: Action {
     }
 
     func stop() async { }
+}
+
+extension ValidateServerAction {
+    /// Whether a server whose chain tip is at `serverTipHeight` must serve Ironwood (NU6.3) tree
+    /// state. True at and after the network's NU6.3 activation, which includes every later upgrade
+    /// such as NU7; false before it, and for a network with no known NU6.3 activation height.
+    static func requiresIronwoodSupport(serverTipHeight: BlockHeight, network: ZcashNetwork) -> Bool {
+        guard let ironwoodActivation = network.ironwoodActivationHeight else {
+            return false
+        }
+        return serverTipHeight >= ironwoodActivation
+    }
 }

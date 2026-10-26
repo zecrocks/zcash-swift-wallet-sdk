@@ -45,6 +45,14 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replacement in this release. The `zcashlc_voting_*` exports are no longer built into
   `libzcashlc`. A voting database written by 4.0.0 is left untouched on disk. See `MIGRATING.md`.
 
+## Fixed
+
+- Server validation during sync now requires Ironwood tree state from any lightwalletd whose chain
+  tip is at or after the network's NU6.3 activation height. It previously checked only a server
+  reporting the NU6.3 branch ID, so a server past NU7 that omitted Ironwood data was accepted and
+  the wallet silently missed Ironwood-pool activity. Such a server is now rejected with
+  `ZcashError.compactBlockProcessorServerMissingIronwoodSupport`.
+
 # 4.0.0 - 2026-10-19
 
 This is the final release of ZcashLightClientKit. Support ends when NU7 activates; development
