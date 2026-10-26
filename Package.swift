@@ -27,11 +27,18 @@ if useLocalFFI {
 } else {
     // Binary target for the Rust FFI library
     // Updated by Scripts/release.sh during the release process
+    //
+    // RELEASE TODO (5.0.0): the checksum below is a placeholder. The 5.0.0
+    // XCFramework has not been built or uploaded yet, so binary mode does not
+    // resolve on this branch; build against a local FFI (`make ffi-macos` and
+    // `make configure-local-ffi`) instead. `Scripts/prepare-release.sh build`
+    // uploads the XCFramework to the zecrocks release and writes its real
+    // checksum here.
     targets.append(
         .binaryTarget(
             name: "libzcashlc",
-            url: "https://github.com/zcash/zcash-swift-wallet-sdk/releases/download/4.0.0/libzcashlc.xcframework.zip",
-            checksum: "0a8d827293cbf8ffc53056b8de4213183f9fafc132c605f232d2160bea180094"
+            url: "https://github.com/zecrocks/zcash-swift-wallet-sdk/releases/download/5.0.0/libzcashlc.xcframework.zip",
+            checksum: "0000000000000000000000000000000000000000000000000000000000000000"
         )
     )
     sdkDependencies.append("libzcashlc")

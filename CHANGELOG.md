@@ -25,6 +25,10 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Changed
 
+- The SDK is published from `https://github.com/zecrocks/zcash-swift-wallet-sdk`, maintained by
+  Zec.rocks under the MIT license, and `Package.swift` downloads `libzcashlc.xcframework.zip` from
+  that repository's GitHub Releases. Point the Swift Package Manager dependency at the new URL;
+  the module and product are still named `ZcashLightClientKit`. See `MIGRATING.md`.
 - From NU7 activation the target block spacing is 25 seconds instead of 75, and a transaction the
   SDK creates without an explicit expiry expires 120 blocks after its target height instead of 40
   (the same wall-clock window). Code that converts block counts to time with a fixed 75-second

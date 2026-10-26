@@ -22,6 +22,34 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   return `-1` with the last error set when the network is invalid or a custom network has not
   been configured.
 
+### Changed
+
+- `zcashlc_set_custom_network` takes a trailing `nu7: i64` argument, the NU7 activation height
+  of the custom network (negative for "not activated"). Existing callers stop compiling against
+  the regenerated header; pass `-1` to keep the previous behavior.
+- The `zcashlc_voting_*` exports, and the voting `#[repr(C)]` types, are no longer part of the
+  default build: shielded voting is disabled until `zcash_voting` has a stable release on the NU7
+  librustzcash line. Enabling the `voting` feature currently fails to compile by design.
+- `zcashlc_get_account` and `zcashlc_spending_key_to_full_viewing_key` encode a viewing key that
+  ZIP 316 Revision 0 cannot represent at Revision 2, and return null with the last error set if
+  the key has no valid encoding.
+- `zcashlc_create_proposed_transactions` and `zcashlc_create_pczt_from_proposal` fail when a
+  recipient unified address has expired, or would expire before the transaction (ZIP 316
+  Revision 2 expiry metadata).
+- The Orchard-to-Ironwood migration schedule's `estimated_duration_hours` is measured with the
+  per-height target block spacing (25 seconds from NU7 activation) instead of a fixed 75 seconds.
+- An immediate pool-migration run whose expiry the wallet does not know is treated as pending for
+  the default expiry delta at the height it was built for (120 blocks from NU7 activation, 40
+  before) instead of a fixed 40 blocks.
+- `zcashlc_tor_lwd_conn_check_single_use_taddr` considers ephemeral addresses exposed within one
+  day of target block time before the chain tip, measured per height, instead of within a fixed
+  1152 blocks, and schedules the next check of an address using the target spacing after the tip
+  instead of a fixed 75 seconds per block. From NU7 activation a day spans 3456 blocks.
+
+## 4.0.0 - 2026-10-19
+
+### Added
+
 - `zcashlc_take_last_error_report` returns the most recent error as an `ErrorReport` (an
   `ErrorKind` discriminant, a redacted message that carries no amount, address, note identifier
   or txid, and the available and required amounts in zatoshis for insufficient funds, `-1`
@@ -232,10 +260,6 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   itself never touches.
 
 ### Changed
-- `zcashlc_tor_lwd_conn_check_single_use_taddr` considers ephemeral addresses exposed within one
-  day of target block time before the chain tip, measured per height, instead of within a fixed
-  1152 blocks, and schedules the next check of an address using the target spacing after the tip
-  instead of a fixed 75 seconds per block. From NU7 activation a day spans 3456 blocks.
 - The `zcashlc_voting_*` FFI is compiled again, against the Ironwood (NU6.3)
   dependency stack. It had been gated behind `#[cfg(zcash_voting)]` on the
   grounds that `zcash_voting` could not resolve against the Ironwood `orchard`
@@ -812,23 +836,6 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `zcashlc_set_custom_network` takes a trailing `nu7: i64` argument, the NU7 activation height
-  of the custom network (negative for "not activated"). Existing callers stop compiling against
-  the regenerated header; pass `-1` to keep the previous behavior.
-- The `zcashlc_voting_*` exports, and the voting `#[repr(C)]` types, are no longer part of the
-  default build: shielded voting is disabled until `zcash_voting` has a stable release on the NU7
-  librustzcash line. Enabling the `voting` feature currently fails to compile by design.
-- `zcashlc_get_account` and `zcashlc_spending_key_to_full_viewing_key` encode a viewing key that
-  ZIP 316 Revision 0 cannot represent at Revision 2, and return null with the last error set if
-  the key has no valid encoding.
-- `zcashlc_create_proposed_transactions` and `zcashlc_create_pczt_from_proposal` fail when a
-  recipient unified address has expired, or would expire before the transaction (ZIP 316
-  Revision 2 expiry metadata).
-- The Orchard-to-Ironwood migration schedule's `estimated_duration_hours` is measured with the
-  per-height target block spacing (25 seconds from NU7 activation) instead of a fixed 75 seconds.
-- An immediate pool-migration run whose expiry the wallet does not know is treated as pending for
-  the default expiry delta at the height it was built for (120 blocks from NU7 activation, 40
-  before) instead of a fixed 40 blocks.
 - Updated to `zcash_client_backend 0.20`, `zcash_client_sqlite 0.18`.
 - functions now take `confirmations_policy: ConfirmationsPolicy` instead of `min_confirmations: u32`:
 

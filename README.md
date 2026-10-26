@@ -1,20 +1,17 @@
 # Zcash iOS Framework
 
-[![Build Status](https://travis-ci.org/zcash/ZcashLightClientKit.svg?branch=master)](https://travis-ci.org/zcash/ZcashLightClientKit)
+[![Build and Run Offline Tests](https://github.com/zecrocks/zcash-swift-wallet-sdk/actions/workflows/swift.yml/badge.svg)](https://github.com/zecrocks/zcash-swift-wallet-sdk/actions/workflows/swift.yml)
 
-# End of Support
-Version 4.0.0 is the final release of ZcashLightClientKit. Support for this SDK
-will end when [NU7 activates](https://zips.z.cash/zip-0259), currently expected
-in November 2026\.
+# Maintained by Zec.rocks
+This repository, [zecrocks/zcash-swift-wallet-sdk](https://github.com/zecrocks/zcash-swift-wallet-sdk),
+is the continuation of ZcashLightClientKit, the original Zcash Swift wallet SDK, maintained by
+[Zec.rocks](https://zec.rocks) under the same MIT license. The original SDK's support ends when NU7
+activates; this continuation supports NU7 from version 5.0.0 onward.
 
-Development will continue in the [ZODL Swift Wallet SDK](https://github.com/zodl-inc/zodl-swift-wallet-sdk), alongside [ZODL Slipstream](https://github.com/zodl-inc/slipstream). These
-projects are available under the GNU Affero General Public License (AGPLv3), with
-separate commercial licensing options for developers whose needs require different terms.
-
-We thank the Zcash community for seven years of support, contributions, and collaboration.
+Releases are published from this repository. See `MIGRATING.md` for upgrading from 4.0.0.
 
 # A Zcash Lightweight Client SDK for iOS
-This SDK is no longer under active development; see "End of Support" above. Please be advised of the following:
+Please be advised of the following:
 
 - This code currently is not audited by an external security auditor, use it at your own risk
 - The code **has not been subjected to thorough review** by engineers at the Electric Coin Company
@@ -29,7 +26,11 @@ This SDK is no longer under active development; see "End of Support" above. Plea
 
 ## Swift Package Manager
 
-Add a package with the source "https://github.com/zcash/ZcashLightClientKit.git" and from version `0.14.0-beta` onwards in either Xcode's GUI or in your `Package.swift` file.
+Add a package with the source "https://github.com/zecrocks/zcash-swift-wallet-sdk.git" and from version `5.0.0` onwards in either Xcode's GUI or in your `Package.swift` file:
+
+```swift
+.package(url: "https://github.com/zecrocks/zcash-swift-wallet-sdk.git", from: "5.0.0")
+```
 
 ### Beta version support for Xcode projects
 
