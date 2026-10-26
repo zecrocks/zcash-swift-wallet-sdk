@@ -147,6 +147,12 @@ test-all: ## Run the whole test suite, including networked tests
 test-rust: ## Run the Rust unit tests
 	cargo test
 
+# The licence, source and ban checks from deny.toml; CI's check_native_licenses
+# job runs exactly this. Needs cargo-deny on the PATH.
+.PHONY: deny-rust
+deny-rust: ## Check the Rust dependency graph's licences, sources and bans
+	$(CARGO) deny check licenses sources bans
+
 .PHONY: lint
 lint: ## Lint the Swift sources with SwiftLint
 	@command -v swiftlint >/dev/null 2>&1 || { \
