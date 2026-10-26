@@ -148,6 +148,9 @@ public enum ZcashSDK {
     /// height falls after a later upgrade needs that upgrade's branch ID.
     public static let nu63ConsensusBranchID: ConsensusBranchID = 0x37a5_165b
 
+    /// The consensus branch ID of NU7.
+    public static let nu7ConsensusBranchID: ConsensusBranchID = 0x7719_0ad9
+
     /// The number of zatoshi that equal 1 ZEC.
     public static let zatoshiPerZEC: BlockHeight = 100_000_000
 

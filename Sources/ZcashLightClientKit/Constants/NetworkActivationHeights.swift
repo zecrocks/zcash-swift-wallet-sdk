@@ -28,6 +28,9 @@ public struct NetworkActivationHeights: Equatable, Hashable, Sendable {
     public var nu6_2: BlockHeight?
     /// NU6.3 — the "Ironwood" (Orchard note-version V3) activation height.
     public var nu6_3: BlockHeight?
+    /// NU7 — the upgrade that shortens the target block spacing from 75 to 25 seconds and raises the
+    /// default transaction expiry delta from 40 to 120 blocks.
+    public var nu7: BlockHeight?
 
     public init(
         overwinter: BlockHeight? = nil,
@@ -39,7 +42,8 @@ public struct NetworkActivationHeights: Equatable, Hashable, Sendable {
         nu6: BlockHeight? = nil,
         nu6_1: BlockHeight? = nil,
         nu6_2: BlockHeight? = nil,
-        nu6_3: BlockHeight? = nil
+        nu6_3: BlockHeight? = nil,
+        nu7: BlockHeight? = nil
     ) {
         self.overwinter = overwinter
         self.sapling = sapling
@@ -51,10 +55,13 @@ public struct NetworkActivationHeights: Equatable, Hashable, Sendable {
         self.nu6_1 = nu6_1
         self.nu6_2 = nu6_2
         self.nu6_3 = nu6_3
+        self.nu7 = nu7
     }
 
-    /// Every network upgrade active from height 1 — the default set used when a regtest network is
-    /// built without explicit heights (``ZcashNetworkBuilder/network(for:)`` with ``NetworkType/regtest``).
+    /// Every network upgrade through NU6.3 active from height 1 — the default set used when a regtest
+    /// network is built without explicit heights (``ZcashNetworkBuilder/network(for:)`` with
+    /// ``NetworkType/regtest``). NU7 is left unactivated so that this default keeps matching regtest
+    /// nodes configured before NU7; pass ``nu7`` explicitly to test against a node that activates it.
     public static let allActiveFromGenesis = NetworkActivationHeights(
         overwinter: 1,
         sapling: 1,

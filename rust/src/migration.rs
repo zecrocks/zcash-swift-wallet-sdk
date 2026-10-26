@@ -75,7 +75,7 @@ use std::slice;
 use anyhow::anyhow;
 use ffi_helpers::panic::catch_panic;
 use orchard::keys::SpendingKey;
-use rand::rngs::OsRng;
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
 use rusqlite::{Connection, OptionalExtension};
 use zcash_client_backend::data_api::wallet::{
     TargetHeight,
@@ -88,8 +88,9 @@ use zcash_client_sqlite::pool_migration::orchard_ironwood::{
     Error as PoolMigrationStoreError, PoolMigrations,
 };
 use zcash_client_sqlite::util::SystemClock;
+use zcash_primitives::transaction::builder::default_tx_expiry_delta;
 use zcash_protocol::consensus::{
-    BLOCKS_PER_HOUR, BlockHeight, Network, NetworkUpgrade, Parameters,
+    BlockHeight, BranchId, Network, NetworkUpgrade, Parameters, target_time_between,
 };
 use zcash_protocol::value::Zatoshis;
 use zcash_protocol::{PoolType, ShieldedPool, TxId};
@@ -102,7 +103,7 @@ use zcash_pool_migration::satisfiability::{
     Advance, AdvanceConfig, DuenessTargets, ReorgSettleDepth, ReplanThreshold, UnsatisfiableKind,
     advance_migration,
 };
-use zcash_pool_migration::scheduling::{WakeupParams, WakeupScheduleError};
+use zcash_pool_migration::scheduling::{BlockSpacing, WakeupParams, WakeupScheduleError};
 use zcash_pool_migration::signing_rounds::{
     NextFit, PREPARATION_ACTIONS, PlannedTx, SigningRoundBudget, SigningRoundStrategy,
     TRANSFER_ACTIONS, action_weight,
@@ -287,7 +288,7 @@ unsafe fn wallet_db_read_only(
     rusqlite::vtab::array::load_module(&conn)
         .map_err(|e| anyhow!("Error loading wallet database array module: {e}"))?;
     Ok(
-        MigrationWallet::from_connection(conn, network, SystemClock, OsRng)
+        MigrationWallet::from_connection(conn, network, SystemClock, UnwrapErr(SysRng))
             .with_anchor_retention_interval(crate::anchor_retention_interval(network)),
     )
 }
@@ -599,7 +600,8 @@ fn immediate_run_row_if_table_exists(
 /// `zcash_client_sqlite::wallet::get_tx_height`'s own guard; an `expiry_height` of exactly zero
 /// (the wire convention for "no real expiry") is treated the same as a missing one, so it falls
 /// back to the recorded-height bound below rather than reading as "expired since block zero".
-fn resolve_immediate_run(
+fn resolve_immediate_run<P: Parameters>(
+    params: &P,
     conn: &Connection,
     row: ImmediateRunRow,
     tip: BlockHeight,
@@ -616,8 +618,13 @@ fn resolve_immediate_run(
         )
         .optional()?;
     let (mined_height, expiry_height) = found.unwrap_or((None, None));
+    // The run was built for the block after the tip it was recorded at, so the default expiry
+    // delta of that block's consensus branch is the one its builder applied.
+    let fallback_expiry_delta =
+        default_tx_expiry_delta(BranchId::for_height(params, row.recorded_at_height + 1));
     Ok(ImmediateRunLookup {
         recorded_at_height: row.recorded_at_height,
+        fallback_expiry_delta,
         mined_height: mined_height.filter(|h| *h <= tip),
         expiry_height: expiry_height.filter(|h| u32::from(*h) > 0),
     })
@@ -710,7 +717,7 @@ fn plan_and_cache(
 /// reviewing, failing its later commit with `MIGRATION_PLAN_STALE` for no user-visible reason.
 fn compute_plan(ctx: &mut CallCtx) -> anyhow::Result<Option<(MigrationPlan, BlockHeight)>> {
     let backend = account_migration(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
-    let mut rng = OsRng;
+    let mut rng = UnwrapErr(SysRng);
     match engine::plan_migration(&ctx.network, &backend, &mut rng) {
         Ok(plan) => {
             // `plan_migration` itself just resolved the tip internally (`chain_tip_height`) to
@@ -791,15 +798,21 @@ fn schedule_rows(
 /// broadcast (#1806: was the first-to-last broadcast span, which structurally excluded the wait
 /// until the first transfer fires). Empty schedule, or every height at/behind `now`, is `0`
 /// (saturating, never underflows).
-fn estimated_duration_hours(
+fn estimated_duration_hours<P: Parameters>(
+    params: &P,
     broadcast_heights: impl Iterator<Item = BlockHeight>,
     now: BlockHeight,
 ) -> u32 {
-    let now = u32::from(now);
-    broadcast_heights
-        .map(u32::from)
-        .max()
-        .map_or(0, |max| max.saturating_sub(now) / BLOCKS_PER_HOUR)
+    hours_until(params, now, broadcast_heights.max())
+}
+
+/// The target time from `now` to `last`, in whole hours (truncated). The block spacing is taken
+/// per height from `params` (75 s after Blossom, 25 s from NU7 activation), so a schedule that
+/// crosses NU7 activation is measured correctly. `None`, or `last` at/behind `now`, is `0`.
+fn hours_until<P: Parameters>(params: &P, now: BlockHeight, last: Option<BlockHeight>) -> u32 {
+    last.map_or(0, |last| {
+        u32::try_from(target_time_between(params, now, last).as_secs() / 3600).unwrap_or(u32::MAX)
+    })
 }
 
 /// The number of preparation transactions a plan commits (across all layers). Delegates to the
@@ -907,7 +920,8 @@ fn preparation_steps_from_state(state: &MigrationState) -> Vec<FfiMigrationPrepa
 /// the DTO's `anchor_height` field: with ZIP 374 the real anchor is drawn per transfer and
 /// installed at proving time, so the field now carries the "now" height the platform's duration
 /// math measures waits from — it is NOT a commitment-tree anchor.
-fn encode_schedule_from_plan(
+fn encode_schedule_from_plan<P: Parameters>(
+    params: &P,
     plan: &MigrationPlan,
     now_reference: BlockHeight,
     plan_handle: migration_plan_cache::PlanHandle,
@@ -930,6 +944,7 @@ fn encode_schedule_from_plan(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     let estimated = estimated_duration_hours(
+        params,
         plan.schedule().iter().map(|e| e.broadcast_height()),
         now_reference,
     );
@@ -984,13 +999,16 @@ fn stored_transfers(state: &MigrationState) -> Vec<&MigrationTransaction> {
 /// [`estimated_duration_hours`], used by the state-encoded schedule DTO
 /// ([`encode_schedule_from_state`]) to compute the value the platform displays. Empty, or every
 /// height at/behind `now`, is `0` (saturating, never underflows).
-fn stored_duration_hours(transfers: &[&MigrationTransaction], now: BlockHeight) -> u32 {
-    let now = u32::from(now);
-    transfers
-        .iter()
-        .map(|t| u32::from(t.scheduled_height()))
-        .max()
-        .map_or(0, |max| max.saturating_sub(now) / BLOCKS_PER_HOUR)
+fn stored_duration_hours<P: Parameters>(
+    params: &P,
+    transfers: &[&MigrationTransaction],
+    now: BlockHeight,
+) -> u32 {
+    hours_until(
+        params,
+        now,
+        transfers.iter().map(|t| t.scheduled_height()).max(),
+    )
 }
 
 /// Marshal the STORED run's full transfer subset into the platform's schedule DTO — the
@@ -1003,12 +1021,13 @@ fn stored_duration_hours(transfers: &[&MigrationTransaction], now: BlockHeight) 
 /// [`stored_duration_hours`]'s doc). The DTO carries the `0` "no plan" handle: this schedule is
 /// backed by durable, already-committed state, not by a cached proposal, and the commit-shaped
 /// calls resume that stored state without consulting a handle.
-fn encode_schedule_from_state(
+fn encode_schedule_from_state<P: Parameters>(
+    params: &P,
     state: &MigrationState,
     now_reference: BlockHeight,
 ) -> anyhow::Result<*mut FfiMigrationSchedule> {
     let mut transfers = stored_transfers(state);
-    let estimated = stored_duration_hours(&transfers, now_reference);
+    let estimated = stored_duration_hours(params, &transfers, now_reference);
     transfers.sort_by_key(|t| t.scheduled_height());
     let rows = transfers
         .into_iter()
@@ -1083,7 +1102,7 @@ fn commit_or_resume(
         .map_err(|e| plan_stale(&e.to_string()))?;
 
     let target = ctx.target()?;
-    let mut rng = OsRng;
+    let mut rng = UnwrapErr(SysRng);
     let mut backend = account_migration(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
     let (state, unsigned) = if unsigned_out {
         let (state, unsigned) = engine::build_preparation_unsigned(
@@ -1184,7 +1203,7 @@ fn serve_for_broadcast(
         .ok_or_else(|| anyhow!("no migration transaction with id {}", u32::from(id)))?;
     let mut store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
     let tx = store
-        .take_transaction_for_broadcast(state, id)
+        .take_transaction_for_broadcast(UnwrapErr(SysRng), state, id)
         .map_err(|e| broadcast_seam_error(id, e))?;
     let mut raw = Vec::new();
     tx.write(&mut raw)
@@ -1241,7 +1260,8 @@ fn prove_one(
                 .map_or_else(|| ctx.tip(), Ok)?;
             let network = ctx.network;
             let fvk = stored_orchard_fvk(&ctx.wallet, ctx.account)?;
-            let mut prover = WalletMigrationProver::new(&mut ctx.wallet, ctx.account, fvk);
+            let mut prover =
+                WalletMigrationProver::new(&mut ctx.wallet, UnwrapErr(SysRng), ctx.account, fvk);
             let Some(proved) = migration_finalize::prove_due_transaction(
                 &network,
                 &mut prover,
@@ -1249,7 +1269,7 @@ fn prove_one(
                 id,
                 preparation_anchor,
                 scanned_tip,
-                &mut OsRng,
+                &mut UnwrapErr(SysRng),
             )?
             else {
                 // Not scanned/retained yet — transient, retry on a later sweep.
@@ -1560,12 +1580,6 @@ fn ceremony_preparation_pick(
 
 // ----- progress derivation (pure; unit-tested) -----
 
-/// The fallback bound (blocks past `recorded_at_height`) an unmined immediate run is treated as
-/// pending until, when the wallet database does not know (or no longer knows) the transaction's
-/// real expiry height: the typical wallet transaction-expiry delta, so a run that the wallet's own
-/// history never corroborates does not linger forever before the banner re-offers.
-const IMMEDIATE_RUN_FALLBACK_EXPIRY_DELTA: u32 = 40;
-
 /// An immediate-run row resolved against the wallet database (see [`resolve_immediate_run`]),
 /// pre-computed by the caller so [`immediate_run_pending`] stays pure and unit-testable without a
 /// wallet database.
@@ -1573,6 +1587,12 @@ struct ImmediateRunLookup {
     /// The tip height at which the run was recorded — the fallback expiry bound used when the
     /// wallet database does not know the transaction's real expiry height.
     recorded_at_height: BlockHeight,
+    /// The fallback bound (blocks past `recorded_at_height`) an unmined run is treated as pending
+    /// until, when the wallet database does not know (or no longer knows) the transaction's real
+    /// expiry height: the default transaction-expiry delta at the height the run was built for
+    /// (40 blocks before NU7, 120 from NU7 activation), so a run that the wallet's own history
+    /// never corroborates does not linger forever before the banner re-offers.
+    fallback_expiry_delta: u32,
     /// The txid's mined height, if the wallet has observed it mined.
     mined_height: Option<BlockHeight>,
     /// The txid's expiry height, as recorded by the wallet (`None` when the wallet has never
@@ -1585,9 +1605,7 @@ impl ImmediateRunLookup {
     /// recorded expiry when known, otherwise the fallback delta past the record height.
     fn expiry_bound(&self) -> BlockHeight {
         self.expiry_height.unwrap_or_else(|| {
-            BlockHeight::from(
-                u32::from(self.recorded_at_height) + IMMEDIATE_RUN_FALLBACK_EXPIRY_DELTA,
-            )
+            BlockHeight::from(u32::from(self.recorded_at_height) + self.fallback_expiry_delta)
         })
     }
 }
@@ -2600,12 +2618,13 @@ fn drive_advance(
         &mut store,
         state,
         targets,
-        &AdvanceConfig::new(ReorgSettleDepth::new(
-            zcash_pool_migration::scheduling::PROVABLE_ANCHOR_DEPTH,
-        )),
+        &AdvanceConfig::new(
+            ReorgSettleDepth::new(zcash_pool_migration::scheduling::PROVABLE_ANCHOR_DEPTH),
+            BlockSpacing::for_network(&ctx.network),
+        ),
         // librustzcash #2910: re-spreading a missed broadcast schedule draws fresh
         // inter-broadcast gaps, so advancing needs entropy.
-        &mut OsRng,
+        &mut UnwrapErr(SysRng),
     )
     .map_err(|e| anyhow!("advancing the migration failed: {e}"))
 }
@@ -2754,7 +2773,7 @@ pub unsafe extern "C" fn zcashlc_migration_progress(
             return Ok(Box::into_raw(Box::new(FfiMigrationProgress::absent())));
         };
         let tip = ctx.tip()?;
-        let run = resolve_immediate_run(&ctx.store_conn, row, tip)
+        let run = resolve_immediate_run(&ctx.network, &ctx.store_conn, row, tip)
             .map_err(|e| anyhow!("wallet transaction lookup failed: {e}"))?;
         let value = if immediate_run_pending(&run, tip) {
             FfiMigrationProgress {
@@ -2775,7 +2794,7 @@ pub unsafe extern "C" fn zcashlc_migration_progress(
 
 /// The stored run's minimal sync/proving wake-up schedule, as of the SCANNED chain tip — a
 /// verbatim marshal of upstream `MigrationState::sync_wakeup_schedule(current_tip,
-/// &WakeupParams::DEFAULT, OsRng)`: each row is a height at which to wake, sync, and prove, plus
+/// &WakeupParams::DEFAULT, UnwrapErr(SysRng))`: each row is a height at which to wake, sync, and prove, plus
 /// the transfer ids it is responsible for proving. Wake-up heights are floored at the tip (a row
 /// at exactly the tip means "right now"); jitter is re-drawn on every call, so two calls may
 /// legitimately differ — recompute (and re-register with the OS) after any state change rather
@@ -2823,7 +2842,7 @@ pub unsafe extern "C" fn zcashlc_migration_sync_wakeups(
         // and expiry is judged at `tip + 1` internally.
         let tip = ctx.tip()?;
         let wakeups = state
-            .sync_wakeup_schedule(tip, &WakeupParams::DEFAULT, &mut OsRng)
+            .sync_wakeup_schedule(tip, &WakeupParams::DEFAULT, &mut UnwrapErr(SysRng))
             .map_err(|e| match e {
                 WakeupScheduleError::InfeasibleTransfer(id) => wakeup_infeasible(id),
             })?;
@@ -3499,7 +3518,7 @@ pub unsafe extern "C" fn zcashlc_migration_estimate_runs(
     let res = catch_panic(|| {
         let mut ctx = unsafe { open(db_data, db_data_len, account_uuid_bytes, network_id)? };
         let backend = account_migration(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
-        let mut rng = OsRng;
+        let mut rng = UnwrapErr(SysRng);
         let estimate = match engine::estimate_migration_runs(&ctx.network, &backend, &mut rng) {
             Ok(estimate) => Some(estimate),
             // The estimator answers a zero balance with the zero-run estimate rather than this
@@ -3561,7 +3580,7 @@ pub unsafe extern "C" fn zcashlc_migration_propose_transfers(
         let mut ctx = unsafe { open(db_data, db_data_len, account_uuid_bytes, network_id)? };
         match plan_and_cache(&mut ctx, false)? {
             Some((plan, reference_height, handle)) => {
-                encode_schedule_from_plan(&plan, reference_height, handle)
+                encode_schedule_from_plan(&ctx.network, &plan, reference_height, handle)
             }
             None => Ok(encode_empty_schedule()),
         }
@@ -3995,7 +4014,7 @@ pub unsafe extern "C" fn zcashlc_migration_restart_step(
         }
         match plan_and_cache(&mut ctx, false)? {
             Some((plan, reference_height, handle)) => {
-                encode_schedule_from_plan(&plan, reference_height, handle)
+                encode_schedule_from_plan(&ctx.network, &plan, reference_height, handle)
             }
             None => Ok(encode_empty_schedule()),
         }
@@ -4076,10 +4095,10 @@ pub unsafe extern "C" fn zcashlc_migration_refresh_stale_transfers(
         let expired = state.expired_transactions(DuenessTargets::at(target));
         if expired.is_empty() {
             // Nothing to rebuild: the stored schedule IS current — serve it for re-display.
-            return encode_schedule_from_state(&state, tip);
+            return encode_schedule_from_state(&ctx.network, &state, tip);
         }
 
-        let mut rng = OsRng;
+        let mut rng = UnwrapErr(SysRng);
         let mut backend = account_migration(&ctx.wallet, ctx.account, &mut ctx.store_conn)?;
         for id in &expired {
             if let Some(sk) = usk.as_ref().map(|usk| usk.orchard()) {
@@ -4109,7 +4128,7 @@ pub unsafe extern "C" fn zcashlc_migration_refresh_stale_transfers(
         backend
             .replace_migration(&state)
             .map_err(|e| anyhow!("migration store write failed: {e}"))?;
-        encode_schedule_from_state(&state, tip)
+        encode_schedule_from_state(&ctx.network, &state, tip)
     });
     unwrap_exc_or_null(res)
 }
@@ -4571,6 +4590,8 @@ mod tests {
     use zcash_pool_migration::preparation::PreparationPlan;
     use zcash_pool_migration::scheduling::{self, AnchorBucketInterval, SchedulingParams};
     use zcash_pool_migration::signing_rounds::min_signing_rounds;
+    use zcash_primitives::transaction::builder::BLOSSOM_DEFAULT_TX_EXPIRY_DELTA;
+    use zcash_protocol::consensus::MAIN_NETWORK;
 
     fn zat(v: u64) -> Zatoshis {
         Zatoshis::from_u64(v).unwrap()
@@ -4782,9 +4803,8 @@ mod tests {
         use zcash_client_sqlite::WalletDb;
         use zcash_client_sqlite::util::SystemClock;
         use zcash_keys::keys::Era;
-        use zcash_protocol::consensus::MAIN_NETWORK;
 
-        let mut db = WalletDb::for_path(path, MAIN_NETWORK, SystemClock, OsRng)
+        let mut db = WalletDb::for_path(path, MAIN_NETWORK, SystemClock, UnwrapErr(SysRng))
             .expect("the wallet database must open");
         let seed = SecretVec::new(vec![7u8; 32]);
         let treestate = TreeState {
@@ -4802,7 +4822,7 @@ mod tests {
             .expect("account creation must succeed");
         (
             account.expose_uuid().into_bytes(),
-            usk.to_bytes(Era::Orchard),
+            secrecy::ExposeSecret::expose_secret(&usk.to_bytes(Era::Orchard)).clone(),
         )
     }
 
@@ -5098,6 +5118,7 @@ mod tests {
     ) -> ImmediateRunLookup {
         ImmediateRunLookup {
             recorded_at_height: h(recorded_at),
+            fallback_expiry_delta: BLOSSOM_DEFAULT_TX_EXPIRY_DELTA,
             mined_height: mined.map(h),
             expiry_height: expiry.map(h),
         }
@@ -5130,6 +5151,37 @@ mod tests {
         assert!(immediate_run_pending(&run, h(140)));
         // Past the fallback bound: expired.
         assert!(!immediate_run_pending(&run, h(141)));
+    }
+
+    /// A run built for a height from NU7 activation onward falls back to the NU7 default expiry
+    /// delta of 120 blocks rather than the pre-NU7 40.
+    #[test]
+    fn resolve_immediate_run_uses_the_nu7_default_expiry_delta() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE transactions (txid BLOB PRIMARY KEY, mined_height INTEGER, expiry_height INTEGER)",
+        )
+        .unwrap();
+        let nu7 = MAIN_NETWORK
+            .activation_height(NetworkUpgrade::Nu7)
+            .expect("mainnet sets an NU7 activation height");
+        let lookup = |recorded_at_height| {
+            resolve_immediate_run(
+                &MAIN_NETWORK,
+                &conn,
+                ImmediateRunRow {
+                    txid: [1u8; 32],
+                    recorded_at_height,
+                },
+                nu7,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            lookup(nu7 - 2).expiry_bound(),
+            nu7 - 2 + BLOSSOM_DEFAULT_TX_EXPIRY_DELTA
+        );
+        assert_eq!(lookup(nu7 - 1).expiry_bound(), nu7 - 1 + 120);
     }
 
     #[test]
@@ -5178,7 +5230,13 @@ mod tests {
     #[test]
     fn schedule_rows_sort_chronologically_with_prep_offset() {
         let mut rng = StdRng::seed_from_u64(7);
-        let schedule = scheduling::schedule(&SchedulingParams::ZIP_318, h(1_000), 5, &mut rng);
+        let schedule = scheduling::schedule(
+            &SchedulingParams::ZIP_318,
+            &BlockSpacing::UNIFORM,
+            h(1_000),
+            5,
+            &mut rng,
+        );
         // The engine hands the crossing values straight over; they are already net of the fee
         // buffer that pays each transfer's own fee.
         let crossing_values: Vec<Zatoshis> = (1..=5).map(|i| zat(i * 100_000_000)).collect();
@@ -5214,7 +5272,13 @@ mod tests {
         let expected_total: u64 = crossing_values.iter().map(|z| u64::from(*z)).sum();
 
         let mut rng_a = StdRng::seed_from_u64(1);
-        let schedule_a = scheduling::schedule(&SchedulingParams::ZIP_318, h(1_000), 5, &mut rng_a);
+        let schedule_a = scheduling::schedule(
+            &SchedulingParams::ZIP_318,
+            &BlockSpacing::UNIFORM,
+            h(1_000),
+            5,
+            &mut rng_a,
+        );
         let rows_a = schedule_rows(
             &planned_transfers(0, &schedule_a),
             &crossing_values,
@@ -5223,7 +5287,13 @@ mod tests {
         .unwrap();
 
         let mut rng_b = StdRng::seed_from_u64(99);
-        let schedule_b = scheduling::schedule(&SchedulingParams::ZIP_318, h(1_000), 5, &mut rng_b);
+        let schedule_b = scheduling::schedule(
+            &SchedulingParams::ZIP_318,
+            &BlockSpacing::UNIFORM,
+            h(1_000),
+            5,
+            &mut rng_b,
+        );
         let rows_b = schedule_rows(
             &planned_transfers(0, &schedule_b),
             &crossing_values,
@@ -5258,7 +5328,13 @@ mod tests {
     #[test]
     fn schedule_rows_reject_length_mismatch() {
         let mut rng = StdRng::seed_from_u64(7);
-        let schedule = scheduling::schedule(&SchedulingParams::ZIP_318, h(1_000), 3, &mut rng);
+        let schedule = scheduling::schedule(
+            &SchedulingParams::ZIP_318,
+            &BlockSpacing::UNIFORM,
+            h(1_000),
+            3,
+            &mut rng,
+        );
         let crossing_values = vec![zat(100)];
         assert!(
             schedule_rows(
@@ -5290,6 +5366,7 @@ mod tests {
         .unwrap();
         let schedule = scheduling::schedule(
             &SchedulingParams::ZIP_318,
+            &BlockSpacing::UNIFORM,
             h(1_000),
             crossing_values.len(),
             &mut rng,
@@ -5322,15 +5399,38 @@ mod tests {
     fn estimated_duration_hours_is_measured_from_now_to_the_last_broadcast() {
         let heights = [h(1_000_336), h(1_000_432)];
         assert_eq!(
-            estimated_duration_hours(heights.into_iter(), h(1_000_000)),
+            estimated_duration_hours(&MAIN_NETWORK, heights.into_iter(), h(1_000_000)),
             9
+        );
+    }
+
+    /// From NU7 activation blocks are targeted 25 s apart instead of 75 s, so the same block
+    /// distance spans a third of the time; a span crossing activation is summed per height.
+    #[test]
+    fn estimated_duration_hours_uses_the_nu7_block_spacing() {
+        let nu7 = u32::from(
+            MAIN_NETWORK
+                .activation_height(NetworkUpgrade::Nu7)
+                .expect("mainnet sets an NU7 activation height"),
+        );
+        // 432 post-NU7 blocks at 25 s = 3 h (the pre-NU7 spacing would say 9 h).
+        let heights = [h(nu7 + 1_000 + 432)];
+        assert_eq!(
+            estimated_duration_hours(&MAIN_NETWORK, heights.into_iter(), h(nu7 + 1_000)),
+            3
+        );
+        // 144 pre-NU7 blocks (3 h at 75 s) plus 432 post-NU7 blocks (3 h at 25 s) = 6 h.
+        let heights = [h(nu7 - 1 + 432)];
+        assert_eq!(
+            estimated_duration_hours(&MAIN_NETWORK, heights.into_iter(), h(nu7 - 1 - 144)),
+            6
         );
     }
 
     #[test]
     fn estimated_duration_hours_empty_schedule_is_zero() {
         assert_eq!(
-            estimated_duration_hours(std::iter::empty(), h(1_000_000)),
+            estimated_duration_hours(&MAIN_NETWORK, std::iter::empty(), h(1_000_000)),
             0
         );
     }
@@ -5341,7 +5441,7 @@ mod tests {
         // `0` rather than underflowing.
         let heights = [h(900_000), h(950_000), h(1_000_000)];
         assert_eq!(
-            estimated_duration_hours(heights.into_iter(), h(1_000_000)),
+            estimated_duration_hours(&MAIN_NETWORK, heights.into_iter(), h(1_000_000)),
             0
         );
     }
@@ -5367,19 +5467,25 @@ mod tests {
     fn stored_duration_hours_is_measured_from_now_to_the_last_scheduled_height() {
         let a = transfer_at(0, 1_000_336);
         let b = transfer_at(1, 1_000_432);
-        assert_eq!(stored_duration_hours(&[&a, &b], h(1_000_000)), 9);
+        assert_eq!(
+            stored_duration_hours(&MAIN_NETWORK, &[&a, &b], h(1_000_000)),
+            9
+        );
     }
 
     #[test]
     fn stored_duration_hours_empty_is_zero() {
-        assert_eq!(stored_duration_hours(&[], h(1_000_000)), 0);
+        assert_eq!(stored_duration_hours(&MAIN_NETWORK, &[], h(1_000_000)), 0);
     }
 
     #[test]
     fn stored_duration_hours_all_overdue_is_zero() {
         let a = transfer_at(0, 900_000);
         let b = transfer_at(1, 950_000);
-        assert_eq!(stored_duration_hours(&[&a, &b], h(1_000_000)), 0);
+        assert_eq!(
+            stored_duration_hours(&MAIN_NETWORK, &[&a, &b], h(1_000_000)),
+            0
+        );
     }
 
     /// The DTO-constructing encode path end to end: `encode_schedule_from_state` must thread its
@@ -5427,8 +5533,8 @@ mod tests {
             AnchorBucketInterval::ZIP_318,
         );
 
-        let schedule_ptr =
-            encode_schedule_from_state(&state, h(1_000_000)).expect("encoding must succeed");
+        let schedule_ptr = encode_schedule_from_state(&MAIN_NETWORK, &state, h(1_000_000))
+            .expect("encoding must succeed");
         let schedule = unsafe { &*schedule_ptr };
         assert_eq!(schedule.estimated_duration_hours, 9);
         assert_eq!(
@@ -5787,7 +5893,7 @@ mod tests {
         use orchard::note::{ExtractedNoteCommitment, Note, NoteVersion, RandomSeed, Rho};
         use orchard::note_encryption::{OrchardDomain, OrchardNoteEncryption};
         use orchard::value::NoteValue;
-        use rand::RngCore;
+        use rand::Rng;
         use zcash_client_backend::proto::compact_formats::CompactOrchardAction;
         use zcash_note_encryption::Domain;
 
@@ -5838,7 +5944,7 @@ mod tests {
             nullifier: nf_old.to_vec(),
             cmx: cmx.to_bytes().to_vec(),
             ephemeral_key: ephemeral_key.0.to_vec(),
-            ciphertext: enc_ciphertext[..52].to_vec(),
+            ciphertext: enc_ciphertext.as_ref()[..52].to_vec(),
         }
     }
 
@@ -5919,7 +6025,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut wallet = WalletDb::for_path(path, MAIN_NETWORK, SystemClock, OsRng)
+        let mut wallet = WalletDb::for_path(path, MAIN_NETWORK, SystemClock, UnwrapErr(SysRng))
             .expect("the fixture wallet database must reopen");
 
         // Height 0, empty frontier: the exact chain state `create_fixture_account_with_usk`'s
@@ -7010,6 +7116,7 @@ mod tests {
         .unwrap();
 
         let mined = resolve_immediate_run(
+            &MAIN_NETWORK,
             &conn,
             ImmediateRunRow {
                 txid: [1u8; 32],
@@ -7022,6 +7129,7 @@ mod tests {
         assert_eq!(mined.expiry_height, Some(h(200)));
 
         let unmined = resolve_immediate_run(
+            &MAIN_NETWORK,
             &conn,
             ImmediateRunRow {
                 txid: [2u8; 32],
@@ -7035,6 +7143,7 @@ mod tests {
 
         // A txid the wallet has never observed at all: both columns resolve to None.
         let unknown = resolve_immediate_run(
+            &MAIN_NETWORK,
             &conn,
             ImmediateRunRow {
                 txid: [9u8; 32],
@@ -7070,6 +7179,7 @@ mod tests {
         .unwrap();
 
         let future_mined = resolve_immediate_run(
+            &MAIN_NETWORK,
             &conn,
             ImmediateRunRow {
                 txid: [1u8; 32],
@@ -7084,6 +7194,7 @@ mod tests {
         );
 
         let zero_expiry = resolve_immediate_run(
+            &MAIN_NETWORK,
             &conn,
             ImmediateRunRow {
                 txid: [2u8; 32],
@@ -7312,7 +7423,7 @@ mod tests {
         use orchard::keys::{FullViewingKey, Scope, SpendingKey};
         use orchard::note::{Note, NoteVersion, RandomSeed, Rho};
         use orchard::value::NoteValue;
-        use rand::RngCore;
+        use rand::Rng;
         use zcash_primitives::transaction::fees::zip317::MARGINAL_FEE;
         use zcash_protocol::consensus::MAIN_NETWORK;
 
@@ -7732,7 +7843,7 @@ mod tests {
     }
 
     /// [`migration_finalize::prove_due_transaction`] with the re-draw inputs every dispatch test
-    /// shares: testnet parameters, a scanned tip far past every fixture height, and `OsRng`. No
+    /// shares: testnet parameters, a scanned tip far past every fixture height, and `UnwrapErr(SysRng)`. No
     /// fixture here triggers the proving-time boundary re-draw (every mined dependency mines at
     /// height 100, below each drawn boundary), so these remain pure dispatch tests — the re-draw
     /// itself is covered by the engine's own suite.
@@ -7758,7 +7869,7 @@ mod tests {
             id,
             preparation_anchor,
             h(5_000),
-            &mut OsRng,
+            &mut UnwrapErr(SysRng),
         )
         .map(|outcome| outcome.map(|proved| proved.apply(state)))
     }
@@ -10900,7 +11011,7 @@ mod tests {
         let mut store = account_store(&ctx.wallet, ctx.account, &mut ctx.store_conn)
             .expect("the fixture store opens");
         store
-            .take_transaction_for_broadcast(state, MigrationTransferId::new(id))
+            .take_transaction_for_broadcast(UnwrapErr(SysRng), state, MigrationTransferId::new(id))
             .map(|_| ())
     }
 
@@ -11164,21 +11275,24 @@ mod tests {
             3_600_001,
             "the release lands at the scanned target, where the wallet can execute it"
         );
-        // The lag is 3,600,001 - 3,500,000 = 100,001 blocks; every deferred row moves by it.
+        // The deferred rows move later by the time the wallet was behind, and keep their drawn
+        // gaps in TIME. The fixture's scheduled heights precede mainnet NU7 activation (3,543,405)
+        // and the scanned target follows it, so each pre-NU7 gap block (75 s) becomes three
+        // post-NU7 blocks (25 s): the 100- and 200-block gaps become 300 and 600 blocks.
         assert_eq!(
             stored_scheduled_height(&stored, 1),
-            3_600_101,
-            "the first deferred row moves later by the full lag"
+            3_600_001 + 300,
+            "the first deferred row keeps its drawn gap after the released row"
         );
         assert_eq!(
             stored_scheduled_height(&stored, 2),
-            3_600_301,
-            "the second deferred row moves later by the same lag"
+            3_600_001 + 300 + 600,
+            "the second deferred row keeps its drawn gap after the first"
         );
         assert_eq!(
             stored_scheduled_height(&stored, 2) - stored_scheduled_height(&stored, 1),
-            200,
-            "the drawn inter-broadcast gap survives the wallet's absence unchanged"
+            600,
+            "the drawn inter-broadcast gap survives the wallet's absence unchanged in time"
         );
         let _ = std::fs::remove_file(&path);
     }

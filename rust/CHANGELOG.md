@@ -8,6 +8,14 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- NU7: the library is built against `zcash_protocol 0.11`, `zcash_primitives 0.31`,
+  `zcash_client_backend 0.25`, `zcash_client_sqlite 0.23`, `zcash_keys 0.17`, `pczt 0.10` and
+  `orchard 0.16`, so `zcashlc_branch_id_for_height` and transaction construction recognize NU7
+  (branch ID `0x77190AD9`, mainnet height 3543405). Transactions built without an explicit expiry
+  from NU7 activation onward expire 120 blocks after their target height instead of 40.
+- `voting` Cargo feature (off by default) gating the shielded-voting module. In the generated
+  `zcashlc.h` the voting declarations sit inside `#if defined(ZCASHLC_VOTING)`.
+
 - `zcashlc_take_last_error_report` returns the most recent error as an `ErrorReport` (an
   `ErrorKind` discriminant, a redacted message that carries no amount, address, note identifier
   or txid, and the available and required amounts in zatoshis for insufficient funds, `-1`
@@ -794,6 +802,23 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `zcashlc_set_custom_network` takes a trailing `nu7: i64` argument, the NU7 activation height
+  of the custom network (negative for "not activated"). Existing callers stop compiling against
+  the regenerated header; pass `-1` to keep the previous behavior.
+- The `zcashlc_voting_*` exports, and the voting `#[repr(C)]` types, are no longer part of the
+  default build: shielded voting is disabled until `zcash_voting` has a stable release on the NU7
+  librustzcash line. Enabling the `voting` feature currently fails to compile by design.
+- `zcashlc_get_account` and `zcashlc_spending_key_to_full_viewing_key` encode a viewing key that
+  ZIP 316 Revision 0 cannot represent at Revision 2, and return null with the last error set if
+  the key has no valid encoding.
+- `zcashlc_create_proposed_transactions` and `zcashlc_create_pczt_from_proposal` fail when a
+  recipient unified address has expired, or would expire before the transaction (ZIP 316
+  Revision 2 expiry metadata).
+- The Orchard-to-Ironwood migration schedule's `estimated_duration_hours` is measured with the
+  per-height target block spacing (25 seconds from NU7 activation) instead of a fixed 75 seconds.
+- An immediate pool-migration run whose expiry the wallet does not know is treated as pending for
+  the default expiry delta at the height it was built for (120 blocks from NU7 activation, 40
+  before) instead of a fixed 40 blocks.
 - Updated to `zcash_client_backend 0.20`, `zcash_client_sqlite 0.18`.
 - functions now take `confirmations_policy: ConfirmationsPolicy` instead of `min_confirmations: u32`:
 

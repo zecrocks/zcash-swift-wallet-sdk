@@ -6,6 +6,37 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 # Unreleased
 
+## Added
+
+- NU7 support. The SDK is built on the NU7 librustzcash release line (`zcash_protocol 0.11`,
+  `zcash_client_backend 0.25`, `zcash_client_sqlite 0.23`, `orchard 0.16`), which knows the NU7
+  mainnet activation height (3543405) and consensus branch ID. No call-site change is needed.
+- `ZcashSDK.nu7ConsensusBranchID` publishes the NU7 consensus branch ID, `0x7719_0ad9`.
+- `NetworkActivationHeights.nu7` and a trailing `nu7:` parameter on
+  `NetworkActivationHeights.init`, defaulting to `nil` (NU7 not activated). Set it to the
+  `nuparams` NU7 height of a custom or regtest node that activates NU7.
+  `NetworkActivationHeights.allActiveFromGenesis` leaves `nu7` unset.
+
+## Changed
+
+- From NU7 activation the target block spacing is 25 seconds instead of 75, and a transaction the
+  SDK creates without an explicit expiry expires 120 blocks after its target height instead of 40
+  (the same wall-clock window). Code that converts block counts to time with a fixed 75-second
+  spacing, or assumes a 40-block expiry, is wrong for heights past activation.
+- Sending to a unified address now enforces ZIP 316 Revision 2 address expiry: a proposal or
+  transaction that pays an address known to have expired, or whose expiry height the
+  transaction's expiry would exceed, fails instead of being created.
+- Unified addresses and viewing keys that ZIP 316 Revision 0 cannot represent (for example a
+  transparent-only unified address derived from a transparent-only UFVK) are encoded at
+  Revision 2. Revision 2 unified addresses use the `zu` and `tu` prefixes.
+- ZIP 321 payment requests that name a Sprout recipient are rejected when parsed.
+- The Orchard-to-Ironwood migration schedule's `estimatedDurationHours` now measures blocks at or
+  after NU7 activation at the 25-second spacing; it previously assumed 75 seconds per block, so
+  estimates spanning NU7 were up to three times too long.
+- Shielded voting is unavailable. The `zcashlc_voting_*` exports that back `VotingRustBackend`
+  are no longer built into `libzcashlc`, because `zcash_voting` has no stable release on the NU7
+  librustzcash line.
+
 # 4.0.0 - 2026-10-19
 
 This is the final release of ZcashLightClientKit. Support ends when NU7 activates; development
