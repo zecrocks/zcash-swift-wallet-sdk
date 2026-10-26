@@ -1,3 +1,20 @@
+# Migrating from 4.0.0 to 5.0.0
+
+## The shielded voting API is removed
+
+`VotingRustBackend`, the `Voting*` types and
+`PirSnapshotResolver`/`PirSnapshotProbing`/`HTTPPirSnapshotProbe` are gone, and
+`libzcashlc` no longer exports `zcashlc_voting_*`. `zcash_voting` has no stable
+release that builds against the NU7 librustzcash crates, so the SDK cannot ship
+it on 5.0.0. Any reference to these symbols stops compiling and there is no
+replacement in this release.
+
+A wallet that offers shielded voting must hide or disable that feature when it
+moves to 5.0.0. The SDK does not open, migrate or delete a voting database
+written by 4.0.0, so a voting database and any hotkey secrets the app persisted
+stay where the app put them; keep them if the app expects to offer voting again
+once the SDK restores it.
+
 # Migrating from previous versions to 4.0.0
 
 ## Proposal errors carry `RedactedRustError` instead of `String`

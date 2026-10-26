@@ -33,9 +33,17 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Orchard-to-Ironwood migration schedule's `estimatedDurationHours` now measures blocks at or
   after NU7 activation at the 25-second spacing; it previously assumed 75 seconds per block, so
   estimates spanning NU7 were up to three times too long.
-- Shielded voting is unavailable. The `zcashlc_voting_*` exports that back `VotingRustBackend`
-  are no longer built into `libzcashlc`, because `zcash_voting` has no stable release on the NU7
-  librustzcash line.
+
+## Removed
+
+- The shielded voting API, because `zcash_voting` has no stable release on the NU7 librustzcash
+  line: `VotingRustBackend`, `VotingRustBackendError`, every public `Voting*` type (including
+  `VotingHotkey`, `VotingHotkeySecret`, `VotingSeed`, `VotingSeedFingerprint`,
+  `VotingOrchardFullViewingKey` and `VotingPirLayout`), and
+  `PirSnapshotResolver`/`PirSnapshotResolverError`/`PirSnapshotProbeOutcome`/`PirSnapshotProbing`/
+  `HTTPPirSnapshotProbe`. Code that references any of them stops compiling; there is no
+  replacement in this release. The `zcashlc_voting_*` exports are no longer built into
+  `libzcashlc`. A voting database written by 4.0.0 is left untouched on disk. See `MIGRATING.md`.
 
 # 4.0.0 - 2026-10-19
 
