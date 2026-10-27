@@ -79,6 +79,24 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that height (40 blocks before NU7, 120 from NU7 activation). It previously assumed 20 blocks,
   which left the rewind too shallow to cover the transaction's target height.
 
+## Checkpoints
+
+Mainnet
+
+````
+Sources/ZcashLightClientKit/Resources/checkpoints/mainnet/3392500.json
+...
+Sources/ZcashLightClientKit/Resources/checkpoints/mainnet/3532500.json
+````
+
+Testnet
+
+````
+Sources/ZcashLightClientKit/Resources/checkpoints/testnet/4100000.json
+...
+Sources/ZcashLightClientKit/Resources/checkpoints/testnet/4540000.json
+````
+
 # 4.0.0 - 2026-10-19
 
 This is the final release of ZcashLightClientKit. Support ends when NU7 activates; development
