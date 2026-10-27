@@ -275,6 +275,8 @@ private extension Nu7TestnetTests {
 
     static func log(_ message: String) {
         print("NU7TEST \(message)")
+        // XCTest buffers stdout; flushing keeps the CI log in step with the run.
+        fflush(stdout)
     }
 
     static func scratchDirectory(_ name: String) -> URL {
@@ -362,7 +364,7 @@ private extension Nu7TestnetTests {
             outputParamsURL: directory.appendingPathComponent("sapling-output.params"),
             saplingParamsSourceURL: SaplingParamsSourceURL.tests,
             alias: .custom("nu7test"),
-            loggingPolicy: .custom(ConsoleLogger(minLevel: .info)),
+            loggingPolicy: .custom(WarningLogger()),
             isTorEnabled: false,
             isExchangeRateEnabled: false
         )
@@ -411,14 +413,31 @@ private extension Nu7TestnetTests {
         let deadline = Date().addingTimeInterval(syncTimeoutMinutes * 60)
         var polls = 0
         var lastError: String?
+        // The synchronizer retries failed syncs indefinitely, so a deterministic failure would
+        // otherwise only surface at the timeout. Fail once errors recur with no scan progress.
+        let stallLimit: TimeInterval = 15 * 60
+        var lastProgress: Float = -1
+        var lastProgressAt = Date()
         while Date() < deadline {
             let state = synchronizer.latestState
-            if case let .error(error) = state.syncStatus {
+            switch state.syncStatus {
+            case let .error(error):
                 let description = describe(error)
                 if description != lastError {
                     log("sync error (the synchronizer retries): \(description)")
                     lastError = description
                 }
+            case let .syncing(progress, _) where progress != lastProgress:
+                lastProgress = progress
+                lastProgressAt = Date()
+            default:
+                break
+            }
+            if let lastError, Date().timeIntervalSince(lastProgressAt) > stallLimit {
+                throw TestFailure(
+                    message: "no sync progress for \(Int(stallLimit / 60)) minutes at "
+                    + "fullyScanned=\(state.fullyScannedHeight) progress=\(lastProgress); last error: \(lastError)"
+                )
             }
             if polls % 12 == 0 {
                 log(
@@ -472,5 +491,29 @@ private extension Nu7TestnetTests {
             try await Task.sleep(nanoseconds: pollInterval * 2)
         }
         throw TestFailure(message: "\(txId.toHexStringTxId()) was not mined within \(mineTimeoutMinutes) minutes")
+    }
+}
+
+/// Prints the SDK's warnings and errors to stdout so they appear in the CI log; the per-batch
+/// debug and info lines of a long restore would bury the suite's own output.
+private struct WarningLogger: Logger {
+    func maxLogLevel() -> OSLogger.LogLevel? { .warning }
+    func debug(_ message: String, file: StaticString, function: StaticString, line: Int) {}
+    func info(_ message: String, file: StaticString, function: StaticString, line: Int) {}
+    func event(_ message: String, file: StaticString, function: StaticString, line: Int) {}
+    func sync(_ message: String, file: StaticString, function: StaticString, line: Int) {}
+
+    func warn(_ message: String, file: StaticString, function: StaticString, line: Int) {
+        emit("WARNING", message, file, line)
+    }
+
+    func error(_ message: String, file: StaticString, function: StaticString, line: Int) {
+        emit("ERROR", message, file, line)
+    }
+
+    private func emit(_ level: String, _ message: String, _ file: StaticString, _ line: Int) {
+        let fileName = (String(describing: file) as NSString).lastPathComponent
+        print("[\(level)] \(fileName):\(line) \(message)")
+        fflush(stdout)
     }
 }
