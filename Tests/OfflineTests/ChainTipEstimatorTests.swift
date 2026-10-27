@@ -305,4 +305,49 @@ final class ChainTipEstimatorTests: XCTestCase {
 
         XCTAssertEqual(tip, 3_000_999 + 900, "floor(27900 / 31) == 900 blocks across the absence")
     }
+
+    // MARK: - Fallback: the network's target spacing
+
+    /// A stand-in for a network on which NU7 activates at height 2_000_000.
+    private let nu7Spacing: @Sendable (BlockHeight) -> Double? = { $0 >= 2_000_000 ? 25 : 75 }
+
+    /// With one sample, the fallback is the target spacing of the block after it, so a projection
+    /// past NU7 activation runs at 25 s per block rather than the pre-NU7 75 s.
+    func testFallbackUsesTheTargetSpacingAfterTheLatestSample() {
+        let preNU7 = ChainTipEstimator(samples: [s(1_999_998, 1_700_000_000)], targetSpacing: nu7Spacing)
+        let atActivation = ChainTipEstimator(samples: [s(1_999_999, 1_700_000_000)], targetSpacing: nu7Spacing)
+
+        XCTAssertEqual(preNU7.secondsPerBlock(), 75)
+        XCTAssertEqual(atActivation.secondsPerBlock(), 25)
+        XCTAssertEqual(
+            atActivation.estimatedTip(now: Date(timeIntervalSince1970: 1_700_000_000 + 250)),
+            1_999_999 + 10,
+            "250 s at the post-NU7 25 s spacing is 10 blocks"
+        )
+    }
+
+    /// With no sample there is no height, so the fallback is the shortest spacing the network is
+    /// scheduled to have: a timer derived from it errs early, not late.
+    func testFallbackWithNoSamplesUsesTheShortestScheduledSpacing() {
+        let estimator = ChainTipEstimator(samples: [], targetSpacing: nu7Spacing)
+
+        XCTAssertEqual(estimator.secondsPerBlock(), 25)
+    }
+
+    /// An unknown spacing keeps the fixed fallback.
+    func testFallbackWithUnknownSpacingIsTheFixedFallback() {
+        let estimator = ChainTipEstimator(samples: [s(2_500_000, 1_700_000_000)], targetSpacing: { _ in nil })
+
+        XCTAssertEqual(estimator.secondsPerBlock(), ChainTipEstimator.fallbackSecondsPerBlock)
+    }
+
+    /// A measured rate is never replaced by the target spacing.
+    func testMeasuredRateIgnoresTheTargetSpacing() {
+        let estimator = ChainTipEstimator(
+            samples: [s(2_500_000, 1_700_000_000), s(2_500_010, 1_700_000_600)],
+            targetSpacing: nu7Spacing
+        )
+
+        XCTAssertEqual(estimator.secondsPerBlock(), 60)
+    }
 }

@@ -169,7 +169,8 @@ struct ZcashRustBackend: ZcashRustBackendWelding {
             height(heights.nu6),
             height(heights.nu6_1),
             height(heights.nu6_2),
-            height(heights.nu6_3)
+            height(heights.nu6_3),
+            height(heights.nu7)
         )
     }
 
@@ -2686,6 +2687,37 @@ struct ZcashRustBackend: ZcashRustBackendWelding {
         }
 
         return BlockHeight(height)
+    }
+
+    /// The target spacing between the block at `height` and its parent on `networkType`, in
+    /// seconds: 75 from Blossom until NU7 and 25 from NU7 activation. `nil` when the network's
+    /// parameters are unavailable, for example a custom network that has not been configured yet.
+    /// Stateless (no db access); consumes any last error the call sets, like
+    /// ``ironwoodActivationHeight(networkType:)``.
+    static func targetBlockSpacing(height: BlockHeight, networkType: NetworkType) -> TimeInterval? {
+        let spacing = zcashlc_target_block_spacing(UInt32(clamping: height), networkType.networkId)
+
+        guard spacing > 0 else {
+            zcashlc_clear_last_error()
+            return nil
+        }
+
+        return TimeInterval(spacing)
+    }
+
+    /// The number of blocks after `targetHeight` at which a transaction built for that height
+    /// expires when no explicit expiry is given: 40 from Blossom until NU7 and 120 from NU7
+    /// activation. `nil` when the network's parameters are unavailable. Stateless (no db access);
+    /// consumes any last error the call sets.
+    static func defaultExpiryDelta(targetHeight: BlockHeight, networkType: NetworkType) -> Int? {
+        let delta = zcashlc_default_tx_expiry_delta(UInt32(clamping: targetHeight), networkType.networkId)
+
+        guard delta >= 0 else {
+            zcashlc_clear_last_error()
+            return nil
+        }
+
+        return Int(delta)
     }
 }
 

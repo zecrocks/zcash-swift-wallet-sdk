@@ -45,9 +45,19 @@ impl Account {
     pub(crate) fn from_account(
         account: &impl zcash_client_backend::data_api::Account<AccountId = AccountUuid>,
         params: &impl zcash_protocol::consensus::Parameters,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let derivation = account.source().key_derivation();
-        Account {
+        let ufvk = account
+            .ufvk()
+            .map(|ufvk| ufvk.encode(params))
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("Error encoding unified full viewing key: {e}"))?;
+        let uivk = account
+            .ufvk()
+            .map(|ufvk| ufvk.to_unified_incoming_viewing_key().encode(params))
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("Error encoding unified incoming viewing key: {e}"))?;
+        Ok(Account {
             uuid_bytes: account.id().expose_uuid().into_bytes(),
             account_name: account.name().map_or(ptr::null_mut(), |name| {
                 CString::new(name).unwrap().into_raw()
@@ -58,14 +68,13 @@ impl Account {
                 .map_or(ptr::null_mut(), |s| CString::new(s).unwrap().into_raw()),
             seed_fingerprint: derivation.map_or([0u8; 32], |d| d.seed_fingerprint().to_bytes()),
             hd_account_index: derivation.map_or(u32::MAX, |d| d.account_index().into()),
-            ufvk: account.ufvk().map_or(ptr::null_mut(), |ufvk| {
-                CString::new(ufvk.encode(params)).unwrap().into_raw()
+            ufvk: ufvk.map_or(ptr::null_mut(), |ufvk| {
+                CString::new(ufvk).unwrap().into_raw()
             }),
-            uivk: account.ufvk().map_or(ptr::null_mut(), |ufvk| {
-                let uivk = ufvk.to_unified_incoming_viewing_key();
-                CString::new(uivk.encode(params)).unwrap().into_raw()
+            uivk: uivk.map_or(ptr::null_mut(), |uivk| {
+                CString::new(uivk).unwrap().into_raw()
             }),
-        }
+        })
     }
 }
 
@@ -339,7 +348,6 @@ impl Balance {
             locked_value: ZatBalance::from(balance.locked_value()).into(),
         }
     }
-
 }
 
 /// Balance information for a single account.
@@ -659,7 +667,7 @@ impl BoxedSlice {
     ///
     /// Same invariants as the [`BoxedSlice`] struct documentation: `ptr` must be valid
     /// for reads of `len` bytes (or `len == 0`).
-    #[cfg(test)]
+    #[cfg(all(test, feature = "voting"))]
     pub(crate) unsafe fn as_slice(&self) -> &[u8] {
         if self.len == 0 || self.ptr.is_null() {
             &[]

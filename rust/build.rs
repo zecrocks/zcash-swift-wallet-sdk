@@ -30,6 +30,10 @@ fn main() {
     if let Ok(b) = cbindgen::Builder::new()
         .with_crate(crate_dir)
         .with_language(cbindgen::Language::C)
+        // Items behind the non-default `voting` feature are wrapped in
+        // `#if defined(ZCASHLC_VOTING)`, so a header consumer that has not opted in sees no
+        // declaration for an export the library does not contain.
+        .with_define("feature", "voting", "ZCASHLC_VOTING")
         .rename_item("Account", "FfiAccount")
         .rename_item("Uuid", "FfiUuid")
         .rename_item("Accounts", "FfiAccounts")

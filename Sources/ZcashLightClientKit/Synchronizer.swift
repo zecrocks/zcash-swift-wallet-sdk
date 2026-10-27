@@ -820,9 +820,16 @@ public protocol Synchronizer: AnyObject {
     ///   block, so no tip exists to estimate from.
     func estimatedMigrationChainTip() async throws -> BlockHeight
 
-    /// The measured seconds-per-block over the most recently scanned blocks: the mean of the last
-    /// up-to-100 consecutive header-time deltas, clamped to [5, 150] s, falling back to 75 s (the
-    /// target spacing) when fewer than two samples exist. Use it to convert
+    /// The measured seconds-per-block over the most recently scanned blocks: the header-time span
+    /// of the last up-to-1000 scanned blocks divided by their height span, clamped to [5, 150] s.
+    /// When no rate can be measured (fewer than two scanned blocks, or header times that do not
+    /// advance) it falls back to the network's target spacing of the block after the latest
+    /// scanned one: 75 s before NU7 activation and 25 s from it. With nothing scanned at all it is
+    /// the shortest spacing the network is scheduled to have, 25 s on mainnet and testnet, so that
+    /// a timer derived from it errs early. The rate is measured, not projected: across NU7
+    /// activation it lags the new spacing until the window fills with post-activation blocks, so
+    /// convert heights past activation with
+    /// ``ZcashNetwork/targetBlockSpacing(at:)`` where that matters. Use it to convert
     /// ``migrationSyncWakeups(accountUUID:)`` heights into wall-clock OS timers. WALLET-scoped
     /// like ``estimatedMigrationChainTip()`` — the measurement reads the shared blocks table, so
     /// it takes no account.

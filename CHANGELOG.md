@@ -6,6 +6,97 @@ and this library adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 # Unreleased
 
+## Added
+
+- NU7 support. The SDK is built on the NU7 librustzcash release line (`zcash_protocol 0.11`,
+  `zcash_client_backend 0.25`, `zcash_client_sqlite 0.23`, `orchard 0.16`), which knows the NU7
+  mainnet activation height (3543405) and consensus branch ID. No call-site change is needed.
+- `ZcashSDK.nu7ConsensusBranchID` publishes the NU7 consensus branch ID, `0x7719_0ad9`.
+- `NetworkActivationHeights.nu7` and a trailing `nu7:` parameter on
+  `NetworkActivationHeights.init`, defaulting to `nil` (NU7 not activated). Set it to the
+  `nuparams` NU7 height of a custom or regtest node that activates NU7.
+  `NetworkActivationHeights.allActiveFromGenesis` leaves `nu7` unset.
+- `ZcashNetwork.targetBlockSpacing(at:)` returns the target time between a block and its parent
+  (75 seconds from Blossom until NU7, 25 seconds from NU7 activation), and
+  `ZcashNetwork.defaultExpiryDelta(atTargetHeight:)` the number of blocks after its target height at
+  which a transaction built without an explicit expiry expires (40 until NU7, 120 from NU7
+  activation). Both return `nil` for a custom network before an `Initializer` has been created
+  for it. Use them instead of fixed 75-second or 40-block assumptions.
+
+## Changed
+
+- The SDK is published from `https://github.com/zecrocks/zcash-swift-wallet-sdk`, maintained by
+  Zec.rocks under the MIT license, and `Package.swift` downloads `libzcashlc.xcframework.zip` from
+  that repository's GitHub Releases. Point the Swift Package Manager dependency at the new URL;
+  the module and product are still named `ZcashLightClientKit`. See `MIGRATING.md`.
+- From NU7 activation the target block spacing is 25 seconds instead of 75, and a transaction the
+  SDK creates without an explicit expiry expires 120 blocks after its target height instead of 40
+  (the same wall-clock window). Code that converts block counts to time with a fixed 75-second
+  spacing, or assumes a 40-block expiry, is wrong for heights past activation.
+- Sending to a unified address now enforces ZIP 316 Revision 2 address expiry: a proposal or
+  transaction that pays an address known to have expired, or whose expiry height the
+  transaction's expiry would exceed, fails instead of being created.
+- Unified addresses and viewing keys that ZIP 316 Revision 0 cannot represent (for example a
+  transparent-only unified address derived from a transparent-only UFVK) are encoded at
+  Revision 2. Revision 2 unified addresses use the `zu` and `tu` prefixes.
+- ZIP 321 payment requests that name a Sprout recipient are rejected when parsed.
+- The Orchard-to-Ironwood migration schedule's `estimatedDurationHours` now measures blocks at or
+  after NU7 activation at the 25-second spacing; it previously assumed 75 seconds per block, so
+  estimates spanning NU7 were up to three times too long.
+- `ZcashSDK.expiryOffset` is deprecated, because no single value is the default expiry delta on
+  both sides of NU7 activation; use `ZcashNetwork.defaultExpiryDelta(atTargetHeight:)`. Its value
+  changes from 20 to 40, the default before NU7 (it had not matched the Rust backend's default
+  since Blossom).
+- From NU7 activation the synchronizer polls for new blocks at half the 25-second block spacing
+  (between about 6 and 19 seconds) instead of between 10 and 30 seconds, so a wallet keeps up with
+  the faster chain. `ZcashSDK.defaultPollInterval` is unchanged and still applies before NU7.
+- `Synchronizer.estimatedMigrationSecondsPerBlock()` falls back to the network's target spacing at
+  the latest scanned height when it cannot measure a rate (75 seconds before NU7, 25 seconds from
+  it) instead of a fixed 75 seconds, and to 25 seconds on mainnet and testnet when nothing has
+  been scanned. The wall-clock chain-tip estimate behind the migration's `estimatedTip` inputs uses
+  the same fallback.
+
+## Removed
+
+- The shielded voting API, because `zcash_voting` has no stable release on the NU7 librustzcash
+  line: `VotingRustBackend`, `VotingRustBackendError`, every public `Voting*` type (including
+  `VotingHotkey`, `VotingHotkeySecret`, `VotingSeed`, `VotingSeedFingerprint`,
+  `VotingOrchardFullViewingKey` and `VotingPirLayout`), and
+  `PirSnapshotResolver`/`PirSnapshotResolverError`/`PirSnapshotProbeOutcome`/`PirSnapshotProbing`/
+  `HTTPPirSnapshotProbe`. Code that references any of them stops compiling; there is no
+  replacement in this release. The `zcashlc_voting_*` exports are no longer built into
+  `libzcashlc`. A voting database written by 4.0.0 is left untouched on disk. See `MIGRATING.md`.
+
+## Fixed
+
+- Server validation during sync now requires Ironwood tree state from any lightwalletd whose chain
+  tip is at or after the network's NU6.3 activation height. It previously checked only a server
+  reporting the NU6.3 branch ID, so a server past NU7 that omitted Ironwood data was accepted and
+  the wallet silently missed Ironwood-pool activity. Such a server is now rejected with
+  `ZcashError.compactBlockProcessorServerMissingIronwoodSupport`.
+- `Synchronizer.rewind(_:)` with `RewindPolicy.transaction(_:)` for an unmined transaction rewinds
+  to before the height the transaction was built for, using the default expiry delta in effect at
+  that height (40 blocks before NU7, 120 from NU7 activation). It previously assumed 20 blocks,
+  which left the rewind too shallow to cover the transaction's target height.
+
+## Checkpoints
+
+Mainnet
+
+````
+Sources/ZcashLightClientKit/Resources/checkpoints/mainnet/3392500.json
+...
+Sources/ZcashLightClientKit/Resources/checkpoints/mainnet/3532500.json
+````
+
+Testnet
+
+````
+Sources/ZcashLightClientKit/Resources/checkpoints/testnet/4100000.json
+...
+Sources/ZcashLightClientKit/Resources/checkpoints/testnet/4540000.json
+````
+
 # 4.0.0 - 2026-10-19
 
 This is the final release of ZcashLightClientKit. Support ends when NU7 activates; development

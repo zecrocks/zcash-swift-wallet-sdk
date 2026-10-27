@@ -208,7 +208,7 @@ hand-written `swift` command:
 
 | Workflow | Trigger | Local equivalent |
 |---|---|---|
-| `swift.yml` | any PR outside its `paths-ignore` list | `make check` (`make build`, `make test-offline`, `make test-rust`) |
+| `swift.yml` | any PR outside its `paths-ignore` list, and weekly | `make check` (`make build`, `make test-offline`, `make test-rust`), and `make deny-rust` (needs `cargo-deny`) for its licence job |
 | `swiftlint.yml` | any PR touching `**/*.swift` or `.swiftlint.yml` | `make lint` |
 | `proto-sync.yml` | any PR outside its `paths-ignore` list | `./Scripts/update-proposal-proto.sh --check` |
 | `zizmor.yml` | every PR | matters when you change a workflow file |

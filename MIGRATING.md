@@ -1,3 +1,82 @@
+# Migrating from 4.0.0 to 5.0.0
+
+5.0.0 is the first release maintained by Zec.rocks, and the first to support
+NU7. Mainnet NU7 activates at height 3543405, so every wallet must ship a
+build on 5.0.0 or later before then.
+
+## Depend on the zecrocks repository
+
+The package moves to `https://github.com/zecrocks/zcash-swift-wallet-sdk`, and
+its prebuilt `libzcashlc` comes from that repository's releases. The module and
+product names are unchanged, so only the dependency declaration changes:
+
+```swift
+// Before
+.package(url: "https://github.com/zcash/zcash-swift-wallet-sdk.git", from: "4.0.0")
+
+// After
+.package(url: "https://github.com/zecrocks/zcash-swift-wallet-sdk.git", from: "5.0.0")
+```
+
+In an Xcode project, remove the old package and add the new URL.
+
+## Blocks are 25 seconds apart from NU7, and expiry is 120 blocks
+
+NU7 shortens the target block spacing from 75 to 25 seconds, and transactions
+the SDK builds without an explicit expiry expire 120 blocks after their target
+height instead of 40, which is the same wall-clock window. Any app code that
+turns block counts into time, or assumes the expiry delta, with a fixed number
+is wrong past activation. Ask the network for the value at the height in
+question:
+
+```swift
+// Before
+let eta = TimeInterval(blocksRemaining * 75)
+let expiresAt = targetHeight + ZcashSDK.expiryOffset
+
+// After
+let spacing = network.targetBlockSpacing(at: tipHeight + 1) ?? 25
+let eta = TimeInterval(blocksRemaining) * spacing
+let expiresAt = targetHeight + (network.defaultExpiryDelta(atTargetHeight: targetHeight) ?? 120)
+```
+
+`ZcashSDK.expiryOffset` is deprecated, and its value is now 40, the default
+before NU7. A span that crosses activation must be measured block by block, or
+split at the activation height.
+
+## Custom and regtest networks take an NU7 height
+
+`NetworkActivationHeights` gains `nu7`, defaulting to `nil` (not activated). A
+regtest or custom network whose node activates NU7 must set it to that node's
+`nuparams` NU7 height, or the SDK builds transactions with the wrong consensus
+branch past it:
+
+```swift
+let heights = NetworkActivationHeights(sapling: 1, nu5: 1, nu6: 1, nu6_3: 1, nu7: 200)
+let network = ZcashNetworkBuilder.regtest(activationHeights: heights)
+```
+
+`NetworkActivationHeights.allActiveFromGenesis` leaves NU7 unset, matching
+regtest nodes configured before NU7.
+
+Code that calls the C FFI directly must pass the new trailing `nu7` argument of
+`zcashlc_set_custom_network`; `-1` means not activated.
+
+## The shielded voting API is removed
+
+`VotingRustBackend`, the `Voting*` types and
+`PirSnapshotResolver`/`PirSnapshotProbing`/`HTTPPirSnapshotProbe` are gone, and
+`libzcashlc` no longer exports `zcashlc_voting_*`. `zcash_voting` has no stable
+release that builds against the NU7 librustzcash crates, so the SDK cannot ship
+it on 5.0.0. Any reference to these symbols stops compiling and there is no
+replacement in this release.
+
+A wallet that offers shielded voting must hide or disable that feature when it
+moves to 5.0.0. The SDK does not open, migrate or delete a voting database
+written by 4.0.0, so a voting database and any hotkey secrets the app persisted
+stay where the app put them; keep them if the app expects to offer voting again
+once the SDK restores it.
+
 # Migrating from previous versions to 4.0.0
 
 ## Proposal errors carry `RedactedRustError` instead of `String`

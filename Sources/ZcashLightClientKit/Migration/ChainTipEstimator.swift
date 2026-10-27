@@ -29,7 +29,7 @@ import Foundation
 /// height distance instead of counting rows.
 ///
 /// THE WINDOW IS ABSENCE-SCALED. The rate is extrapolated across app-dead gaps measured in hours,
-/// so the sample span must cover hours: ``sampleWindow`` is 1000 blocks (~21 h at target spacing;
+/// so the sample span must cover hours: ``sampleWindow`` is 1000 blocks (~21 h at the pre-NU7 target spacing, ~7 h at the post-NU7 one;
 /// ~6–9 h on a burst-fast testnet). The prior 100-block window (~2 h at target, and as little as
 /// ~30 min on a fast chain) measured whatever regime the chain happened to be in right before
 /// sleep and projected it across the whole night — in the field incident the pre-sleep half hour
@@ -48,36 +48,55 @@ struct ChainTipEstimator {
     static let minSecondsPerBlock: Double = 5
     /// The upper sanity clamp on the final span rate, in seconds (Android parity: 150).
     static let maxSecondsPerBlock: Double = 150
-    /// The seconds-per-block assumed when no rate can be measured (Android parity: 75 — the
-    /// Zcash target block spacing).
+    /// The seconds-per-block assumed when no rate can be measured and the network's target
+    /// spacing is unknown (Android parity: 75 — the target block spacing before NU7).
     static let fallbackSecondsPerBlock: Double = 75
+    /// A height past every scheduled network upgrade, at which ``targetSpacing`` reports the
+    /// shortest spacing the network will have when there is no sample to take a height from.
+    static let farFutureHeight = BlockHeight(UInt32.max)
 
     /// The `(height, header time)` samples, ascending by height (the order the welding returns).
     private let samples: [MigrationBlockRateSample]
+    /// The network's target spacing, in seconds, of the block at a height (75 s before NU7, 25 s
+    /// from NU7 activation), or `nil` when the network's parameters are unavailable.
+    private let targetSpacing: (BlockHeight) -> Double?
 
-    /// Creates an estimator over `samples` (ascending by height; may be empty).
-    init(samples: [MigrationBlockRateSample]) {
+    /// Creates an estimator over `samples` (ascending by height; may be empty) that falls back to
+    /// `targetSpacing` when no rate can be measured.
+    init(samples: [MigrationBlockRateSample], targetSpacing: @escaping (BlockHeight) -> Double? = { _ in nil }) {
         self.samples = samples
+        self.targetSpacing = targetSpacing
+    }
+
+    /// The seconds-per-block assumed when no rate can be measured: the network's target spacing
+    /// of the block after the latest sample, since the measurement would otherwise have covered
+    /// the blocks that follow it. With no sample at all it is the spacing at
+    /// ``farFutureHeight``, the shortest the network will have (25 s once NU7 is scheduled), so
+    /// that a timer derived from it errs early rather than late. ``fallbackSecondsPerBlock`` when
+    /// the network's spacing is unknown.
+    func targetFallbackSecondsPerBlock() -> Double {
+        let height = samples.last.map { $0.height + 1 } ?? Self.farFutureHeight
+        return targetSpacing(height) ?? Self.fallbackSecondsPerBlock
     }
 
     /// The measured seconds-per-block: the SPAN rate over up to the last ``sampleWindow``
     /// samples — total header-time span divided by total height span — clamped once to
     /// [``minSecondsPerBlock``, ``maxSecondsPerBlock``].
     ///
-    /// ``fallbackSecondsPerBlock`` when no rate can be measured: fewer than two samples, a window
+    /// ``targetFallbackSecondsPerBlock()`` when no rate can be measured: fewer than two samples, a window
     /// spanning no height, or header times that do not advance across the window (header times
     /// are miner-supplied and may locally regress; a whole window that fails to advance is a
     /// broken measurement, not a fast chain).
     func secondsPerBlock() -> Double {
         let window = samples.suffix(Self.sampleWindow)
         guard window.count >= 2, let first = window.first, let last = window.last else {
-            return Self.fallbackSecondsPerBlock
+            return targetFallbackSecondsPerBlock()
         }
 
         let heightSpan = Double(last.height - first.height)
         let timeSpan = Double(last.unixTime - first.unixTime)
         guard heightSpan > 0, timeSpan > 0 else {
-            return Self.fallbackSecondsPerBlock
+            return targetFallbackSecondsPerBlock()
         }
 
         return min(max(timeSpan / heightSpan, Self.minSecondsPerBlock), Self.maxSecondsPerBlock)
@@ -107,6 +126,19 @@ struct ChainTipEstimator {
 /// here, so the window constant, the estimator wiring, and the clock injection cannot drift apart
 /// between call sites.
 enum MigrationTipEstimation {
+    /// The network's target spacing, in seconds, of the block at a height, or `nil` when it is
+    /// unknown. See ``ChainTipEstimator/targetFallbackSecondsPerBlock()``.
+    typealias TargetSpacing = @Sendable (BlockHeight) -> Double?
+
+    /// The target spacing of `networkType`'s blocks, as the Rust core defines it per height.
+    static func targetSpacing(for networkType: NetworkType) -> TargetSpacing {
+        { ZcashRustBackend.targetBlockSpacing(height: $0, networkType: networkType) }
+    }
+
+    /// A target spacing that is never known, so the estimator falls back to
+    /// ``ChainTipEstimator/fallbackSecondsPerBlock``. The default of the injecting initializers.
+    static let unknownTargetSpacing: TargetSpacing = { _ in nil }
+
     /// One projection over one samples read: the estimated tip (`nil` with no samples at all —
     /// the wallet has never scanned) and the measured seconds-per-block (the estimator's
     /// fallback when no rate can be measured).
@@ -119,20 +151,29 @@ enum MigrationTipEstimation {
 
     /// Reads the samples and projects at `now`. THROWING: a sample-read failure propagates — this
     /// is the core the public estimated members surface errors from; gate paths use
-    /// ``gatingEstimatedTip(welding:now:)`` instead, which degrades.
-    static func project(welding: ZcashRustBackendWelding, now: Date) async throws -> Projection {
+    /// ``gatingEstimatedTip(welding:targetSpacing:now:)`` instead, which degrades.
+    static func project(
+        welding: ZcashRustBackendWelding,
+        targetSpacing: @escaping TargetSpacing,
+        now: Date
+    ) async throws -> Projection {
         let estimator = ChainTipEstimator(
-            samples: try await welding.migrationBlockRateSamples(window: UInt32(ChainTipEstimator.sampleWindow))
+            samples: try await welding.migrationBlockRateSamples(window: UInt32(ChainTipEstimator.sampleWindow)),
+            targetSpacing: targetSpacing
         )
         return Projection(estimatedTip: estimator.estimatedTip(now: now), secondsPerBlock: estimator.secondsPerBlock())
     }
 
-    /// The estimated tip for gate/delivery due-ness checks: ``project(welding:now:)``'s tip,
+    /// The estimated tip for gate/delivery due-ness checks: ``project(welding:targetSpacing:now:)``'s tip,
     /// degraded to `nil` (scanned-tip behavior) on ANY failure — sample read errors included — so
     /// a read failure can only ever fall back to, never block or crash, the paths that consult
     /// it. NOTE: since upstream #2927 the non-nil estimate is not merely accelerating — it sizes
     /// the persisted overdue re-spread (see the type doc above).
-    static func gatingEstimatedTip(welding: ZcashRustBackendWelding, now: Date) async -> BlockHeight? {
-        (try? await project(welding: welding, now: now))?.estimatedTip
+    static func gatingEstimatedTip(
+        welding: ZcashRustBackendWelding,
+        targetSpacing: @escaping TargetSpacing,
+        now: Date
+    ) async -> BlockHeight? {
+        (try? await project(welding: welding, targetSpacing: targetSpacing, now: now))?.estimatedTip
     }
 }

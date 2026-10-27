@@ -26,6 +26,9 @@ actor OrchardMigrationHost {
     private let sharedBroadcaster: any MigrationBroadcasting
     private let generalStorageURL: URL
     private let now: @Sendable () -> Date
+    /// The network's per-height target block spacing, the estimator's fallback when it cannot
+    /// measure a rate.
+    private let targetSpacing: MigrationTipEstimation.TargetSpacing
     private let logger: Logger
 
     /// Builds a per-account ``OrchardMigration`` bound to `accountUUID`, wired to the given shared
@@ -88,6 +91,7 @@ actor OrchardMigrationHost {
             generalStorageURL: generalStorageURL,
             tickInterval: 15,
             now: { Date() },
+            targetSpacing: MigrationTipEstimation.targetSpacing(for: network.networkType),
             logger: logger,
             actorFactory: factory
         )
@@ -102,6 +106,7 @@ actor OrchardMigrationHost {
         generalStorageURL: URL,
         tickInterval: TimeInterval,
         now: @escaping @Sendable () -> Date,
+        targetSpacing: @escaping MigrationTipEstimation.TargetSpacing = MigrationTipEstimation.unknownTargetSpacing,
         logger: Logger,
         actorFactory: @escaping (AccountUUID, any MigrationBroadcasting) -> OrchardMigration
     ) {
@@ -109,6 +114,7 @@ actor OrchardMigrationHost {
         self.sharedBroadcaster = sharedBroadcaster
         self.generalStorageURL = generalStorageURL
         self.now = now
+        self.targetSpacing = targetSpacing
         self.logger = logger
         self.actorFactory = actorFactory
 
@@ -178,7 +184,7 @@ actor OrchardMigrationHost {
     /// ``ZcashError/migrationChainTipUnavailable`` when even that is unknown because the wallet
     /// has never scanned.
     func estimatedChainTip() async throws -> BlockHeight {
-        let projection = try await MigrationTipEstimation.project(welding: welding, now: now())
+        let projection = try await MigrationTipEstimation.project(welding: welding, targetSpacing: targetSpacing, now: now())
         if let estimated = projection.estimatedTip {
             return estimated
         }
@@ -189,12 +195,14 @@ actor OrchardMigrationHost {
     }
 
     /// The measured seconds-per-block over the most recently scanned blocks (see
-    /// ``ChainTipEstimator/secondsPerBlock()``): the mean of the last up-to-100 consecutive
-    /// header-time deltas, clamped to [5, 150] s, falling back to 75 s (the target spacing) when
-    /// fewer than two samples exist. WALLET-scoped like ``estimatedChainTip()``. A host uses it
-    /// to convert wake-up heights into wall-clock OS timers.
+    /// ``ChainTipEstimator/secondsPerBlock()``): the header-time span of the last up-to-1000
+    /// scanned blocks divided by their height span, clamped to [5, 150] s, falling back to the
+    /// network's target spacing (75 s before NU7, 25 s from NU7 activation) of the block after the
+    /// latest scanned one when no rate can be measured, or to 25 s once NU7 is scheduled when
+    /// nothing has been scanned. WALLET-scoped like ``estimatedChainTip()``. A host uses it to
+    /// convert wake-up heights into wall-clock OS timers.
     func estimatedSecondsPerBlock() async throws -> Double {
-        try await MigrationTipEstimation.project(welding: welding, now: now()).secondsPerBlock
+        try await MigrationTipEstimation.project(welding: welding, targetSpacing: targetSpacing, now: now()).secondsPerBlock
     }
 
     /// A stream of ``isSyncBlocked()`` at wallet scope: emits the current value on subscribe,

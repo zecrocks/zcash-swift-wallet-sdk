@@ -1,0 +1,103 @@
+name: Testnet Verification
+
+# Opt-in verification of the SDK against the live Zcash testnet through testnet.zec.rocks:443
+# (Tests/NetworkTests/Nu7TestnetTests.swift). It needs the network and up to an hour of sync, so it
+# never runs on pull requests.
+#
+# workflow_dispatch only appears once this file is on the default branch; until then, and for
+# verifying a branch, push the commit to a `verify/testnet...` branch.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'verify/testnet**'
+
+permissions: {}
+
+concurrency:
+  group: testnet-verification-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  testnet:
+    name: NU7 testnet verification
+    permissions:
+      contents: read
+
+    # Scopes the wallet seed secret: put NU7_TESTNET_SEED on this environment rather than on the
+    # repository. GitHub creates the environment on the first run if it does not exist.
+    environment: testnet-verification
+
+    runs-on: macos-15
+    timeout-minutes: 240
+
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        persist-credentials: false
+      timeout-minutes: 1
+
+    - name: Select Xcode version
+      run: sudo xcode-select -s '/Applications/Xcode_16.0.app/Contents/Developer'
+
+    # The FFI build and caching below match swift.yml exactly, so the two workflows share caches.
+    - name: Generate FFI source hash
+      id: ffi-hash
+      run: |
+        # Hash all Rust source files, Cargo files, and build support files
+        FFI_HASH=$(find rust Cargo.toml Cargo.lock BuildSupport -type f \( -name "*.rs" -o -name "*.toml" -o -name "*.lock" -o -name "Makefile" -o -name "*.h" -o -name "*.c" -o -name "*.plist" -o -name "*.modulemap" \) -exec shasum {} \; | sort | shasum | cut -d' ' -f1)
+        echo "hash=$FFI_HASH" >> $GITHUB_OUTPUT
+        echo "FFI source hash: $FFI_HASH"
+
+    - name: Cache FFI XCFramework
+      id: cache-ffi
+      uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+      with:
+        path: BuildSupport/products/libzcashlc.xcframework
+        key: ffi-xcframework-macos-only-${{ runner.os }}-${{ steps.ffi-hash.outputs.hash }}
+
+    - name: Setup Rust
+      if: steps.cache-ffi.outputs.cache-hit != 'true'
+      uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+      with:
+        toolchain: stable
+        targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+    - name: Cache Cargo
+      if: steps.cache-ffi.outputs.cache-hit != 'true'
+      uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+      with:
+        # Enumerated rather than caching `~/.cargo` wholesale, for the reason given in swift.yml.
+        path: |
+          target
+          ~/.cargo/bin
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/registry/src
+        key: ${{ runner.os }}-cargo-v1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-v1-
+
+    - name: Build FFI for macOS
+      if: steps.cache-ffi.outputs.cache-hit != 'true'
+      timeout-minutes: 60
+      run: make ffi-macos
+
+    - name: Verify XCFramework
+      run: make verify-ffi
+
+    - name: Configure local FFI for CI
+      run: make configure-local-ffi
+
+    - name: Build ZcashLightClientKit Swift Package
+      timeout-minutes: 15
+      run: make build
+
+    # NU7_TESTNET_SEED is empty unless the secret exists; the suite then restores a
+    # random-seed wallet and skips the spend tests. The secret only reaches this step.
+    - name: Run NU7 testnet verification
+      timeout-minutes: 150
+      env:
+        NU7_TESTNET: "1"
+        NU7_TESTNET_SEED: ${{ secrets.NU7_TESTNET_SEED }}
+      run: make test-nu7-testnet

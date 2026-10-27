@@ -23,8 +23,8 @@ use pczt::{
     roles::{combiner::Combiner, prover::Prover},
 };
 use prost::Message;
-use rand::rngs::OsRng;
-use secrecy::Secret;
+use rand::{rand_core::UnwrapErr, rngs::SysRng};
+use secrecy::{ExposeSecret, Secret};
 use tor_rtcompat::ToplevelBlockOn as _;
 use tracing::{debug, metadata::LevelFilter};
 use tracing_subscriber::prelude::*;
@@ -74,7 +74,7 @@ use zcash_client_sqlite::{
 use zcash_primitives::{
     block::BlockHash,
     merkle_tree::HashSer,
-    transaction::builder::BundlePadding,
+    transaction::builder::{BundlePadding, default_tx_expiry_delta},
     transaction::{Transaction, TxId},
 };
 use zcash_proofs::prover::LocalTxProver;
@@ -83,7 +83,7 @@ use zcash_protocol::{
     consensus::{
         BlockHeight, BranchId, Network,
         Network::{MainNetwork, TestNetwork},
-        NetworkType, NetworkUpgrade, Parameters,
+        NetworkType, NetworkUpgrade, Parameters, pow_target_spacing, target_time_between,
     },
     local_consensus::LocalNetwork,
     memo::MemoBytes,
@@ -104,6 +104,9 @@ mod migration_keystone;
 mod migration_plan_cache;
 mod migration_turnstile;
 mod tor;
+// Shielded voting is disabled by default; see the `voting` feature in `Cargo.toml`. Every
+// voting `zcashlc_*` export lives in this module, so gating it removes them from the library.
+#[cfg(feature = "voting")]
 mod voting;
 
 #[cfg(target_vendor = "apple")]
@@ -181,7 +184,7 @@ unsafe fn wallet_db(
     db_data: *const u8,
     db_data_len: usize,
     network: NetworkParams,
-) -> anyhow::Result<WalletDb<rusqlite::Connection, NetworkParams, SystemClock, OsRng>> {
+) -> anyhow::Result<WalletDb<rusqlite::Connection, NetworkParams, SystemClock, UnwrapErr<SysRng>>> {
     let db_data = Path::new(OsStr::from_bytes(unsafe {
         slice::from_raw_parts(db_data, db_data_len)
     }));
@@ -193,8 +196,10 @@ unsafe fn wallet_db(
         .map_err(|e| anyhow!("Error setting wallet database busy_timeout: {}", e))?;
     rusqlite::vtab::array::load_module(&conn)
         .map_err(|e| anyhow!("Error loading wallet database array module: {}", e))?;
-    Ok(WalletDb::from_connection(conn, network, SystemClock, OsRng)
-        .with_anchor_retention_interval(anchor_retention_interval(network)))
+    Ok(
+        WalletDb::from_connection(conn, network, SystemClock, UnwrapErr(SysRng))
+            .with_anchor_retention_interval(anchor_retention_interval(network)),
+    )
 }
 
 /// Helper method for construcing a FsBlockDb value from path data provided over the FFI.
@@ -498,13 +503,11 @@ pub unsafe extern "C" fn zcashlc_get_account(
         let db_data = unsafe { wallet_db(db_data, db_data_len, network)? };
         let account_uuid = account_uuid_from_bytes(account_uuid_bytes)?;
 
-        Ok(Box::into_raw(Box::new(
-            db_data
-                .get_account(account_uuid)?
-                .map_or(ffi::Account::NOT_FOUND, |account| {
-                    ffi::Account::from_account(&account, &network)
-                }),
-        )))
+        let account = match db_data.get_account(account_uuid)? {
+            Some(account) => ffi::Account::from_account(&account, &network)?,
+            None => ffi::Account::NOT_FOUND,
+        };
+        Ok(Box::into_raw(Box::new(account)))
     });
     unwrap_exc_or_null(res)
 }
@@ -596,7 +599,7 @@ pub unsafe extern "C" fn zcashlc_create_account(
         let encoded = usk.to_bytes(Era::Orchard);
         Ok(Box::into_raw(Box::new(ffi::BinaryKey::new(
             account_uuid,
-            encoded,
+            encoded.expose_secret().clone(),
         ))))
     });
     unwrap_exc_or_null(res)
@@ -1410,8 +1413,6 @@ pub unsafe extern "C" fn zcashlc_seed_fingerprint(
         }
 
         let seed = Secret::new((unsafe { slice::from_raw_parts(seed, seed_len) }).to_vec());
-
-        use secrecy::ExposeSecret;
 
         let signature = match SeedFingerprint::from_seed(seed.expose_secret()) {
             Some(fp) => fp,
@@ -2660,6 +2661,39 @@ pub extern "C" fn zcashlc_branch_id_for_height(height: i32, network_id: u32) -> 
     unwrap_exc_or(res, -1)
 }
 
+/// Returns the target spacing, in seconds, between the block at `height` and its parent on the
+/// network identified by `network_id`, as defined by ZIP 208 and ZIP 218: 150 before Blossom, 75
+/// from Blossom until NU7, and 25 from NU7 activation.
+///
+/// A custom network (`network_id` 2) must have been configured with
+/// `zcashlc_set_custom_network` first. Returns `-1` on error, with the last error set.
+#[unsafe(no_mangle)]
+pub extern "C" fn zcashlc_target_block_spacing(height: u32, network_id: u32) -> i64 {
+    let res = catch_panic(|| {
+        let network = parse_network(network_id)?;
+        let spacing = pow_target_spacing(&network, BlockHeight::from(height));
+        Ok(i64::try_from(spacing.as_secs())?)
+    });
+    unwrap_exc_or(res, -1)
+}
+
+/// Returns the number of blocks after its target height at which a transaction expires when it
+/// is built for `target_height` on the network identified by `network_id` without an explicit
+/// expiry height: 40 from Blossom until NU7, and 120 from NU7 activation (the same wall-clock
+/// window at the shorter block spacing).
+///
+/// A custom network (`network_id` 2) must have been configured with
+/// `zcashlc_set_custom_network` first. Returns `-1` on error, with the last error set.
+#[unsafe(no_mangle)]
+pub extern "C" fn zcashlc_default_tx_expiry_delta(target_height: u32, network_id: u32) -> i64 {
+    let res = catch_panic(|| {
+        let network = parse_network(network_id)?;
+        let branch = BranchId::for_height(&network, BlockHeight::from(target_height));
+        Ok(i64::from(default_tx_expiry_delta(branch)))
+    });
+    unwrap_exc_or(res, -1)
+}
+
 /// Frees strings returned by other zcashlc functions.
 ///
 /// # Safety
@@ -2954,6 +2988,8 @@ pub unsafe extern "C" fn zcashlc_create_proposed_transactions(
         let txids = create_proposed_transactions::<_, _, Infallible, _, Infallible, _>(
             &mut db_data,
             &network,
+            &SystemClock,
+            &mut UnwrapErr(SysRng),
             &prover,
             &prover,
             &SpendingKeys::from_unified_spending_key(usk),
@@ -3086,6 +3122,8 @@ pub unsafe extern "C" fn zcashlc_create_pczt_from_proposal(
             let pczt = create_pczt_from_proposal::<_, _, Infallible, _, Infallible, _>(
                 &mut db_data,
                 &network,
+                &SystemClock,
+                &mut UnwrapErr(SysRng),
                 account_uuid,
                 OvkPolicy::Sender,
                 &proposal,
@@ -3265,6 +3303,7 @@ pub unsafe extern "C" fn zcashlc_add_proofs_to_pczt(
                 })?;
             prover = prover
                 .create_orchard_proof(
+                    UnwrapErr(SysRng),
                     zcash_primitives::transaction::builder::cached_orchard_proving_key(
                         circuit_version,
                     ),
@@ -3288,6 +3327,7 @@ pub unsafe extern "C" fn zcashlc_add_proofs_to_pczt(
                 })?;
             prover = prover
                 .create_ironwood_proof(
+                    UnwrapErr(SysRng),
                     zcash_primitives::transaction::builder::cached_orchard_proving_key(
                         circuit_version,
                     ),
@@ -3313,7 +3353,7 @@ pub unsafe extern "C" fn zcashlc_add_proofs_to_pczt(
             let local_prover = LocalTxProver::new(spend_params, output_params);
 
             prover = prover
-                .create_sapling_proofs(&local_prover, &local_prover)
+                .create_sapling_proofs(UnwrapErr(SysRng), &local_prover, &local_prover)
                 .map_err(|e| anyhow!("Failed to create Sapling proofs for PCZT: {:?}", e))?;
         }
         assert!(!prover.requires_sapling_proofs());
@@ -3430,6 +3470,8 @@ pub unsafe extern "C" fn zcashlc_extract_and_store_from_pczt(
 
         let txid = extract_and_store_transaction_from_pczt::<_, ()>(
             &mut db_data,
+            &SystemClock,
+            &mut UnwrapErr(SysRng),
             pczt,
             sapling_vk.as_ref().map(|(s, o)| (s, o)),
             None,
@@ -3932,7 +3974,7 @@ pub unsafe extern "C" fn zcashlc_get_exchange_rate_usd(
         let rate = tor_runtime.runtime().block_on(async {
             tor_runtime
                 .client()
-                .get_latest_zec_to_usd_rate(&exchanges)
+                .get_latest_zec_to_usd_rate(&mut UnwrapErr(SysRng), &exchanges)
                 .await
         })?;
 
@@ -4064,7 +4106,7 @@ pub unsafe extern "C" fn zcashlc_get_exchange_rate_usd_from(
         let rate = tor_runtime.runtime().block_on(async {
             tor_runtime
                 .client()
-                .get_latest_zec_to_usd_rate(&exchanges)
+                .get_latest_zec_to_usd_rate(&mut UnwrapErr(SysRng), &exchanges)
                 .await
         })?;
 
@@ -4508,8 +4550,13 @@ pub unsafe extern "C" fn zcashlc_tor_lwd_conn_check_single_use_taddr(
         let lwd_conn = unsafe { lwd_conn.as_mut() }
             .ok_or_else(|| anyhow!("A Tor lightwalletd connection is required"))?;
 
-        // one day's worth of blocks.
-        let max_exposure_depth = (24 * 60 * 60) / 75;
+        let cur_height = db_data
+            .chain_height()?
+            .ok_or(SqliteClientError::ChainHeightUnknown)?;
+
+        // One day's worth of blocks ending at the chain tip, measured with the per-height
+        // target spacing so that it remains a day after NU7 shortens the spacing.
+        let max_exposure_depth = blocks_in_target_time(&network, cur_height, ONE_DAY_SECS);
         let addrs =
             db_data.get_ephemeral_transparent_receivers(account_uuid, max_exposure_depth, true)?;
 
@@ -4523,10 +4570,6 @@ pub unsafe extern "C" fn zcashlc_tor_lwd_conn_check_single_use_taddr(
                     && matches!(meta.exposure(), Exposure::Exposed { .. })
             })
             .min_by_key(|(_, meta)| meta.next_check_time());
-
-        let cur_height = db_data
-            .chain_height()?
-            .ok_or(SqliteClientError::ChainHeightUnknown)?;
 
         let mut found = None;
         if let Some((addr, meta)) = selected_addr_meta {
@@ -4564,9 +4607,10 @@ pub unsafe extern "C" fn zcashlc_tor_lwd_conn_check_single_use_taddr(
                 // We will schedule the next check to occur after approximately
                 // log2(blocks_since_exposure) additional blocks.
                 let offset_blocks = blocks_since_exposure.log2();
-                // Convert the offset in blocks to an offset in seconds; this will always fit in a
-                // u32.
-                let offset_seconds = (offset_blocks * 75.0).round() as u32;
+                // Convert the offset in blocks to an offset in seconds at the target spacing of
+                // the blocks that follow the tip; this will always fit in a u32.
+                let spacing = pow_target_spacing(&network, cur_height + 1).as_secs_f64();
+                let offset_seconds = (offset_blocks * spacing).round() as u32;
                 db_data.schedule_next_check(&addr, offset_seconds)?;
             }
         }
@@ -4580,6 +4624,27 @@ pub unsafe extern "C" fn zcashlc_tor_lwd_conn_check_single_use_taddr(
 //
 // Utility functions
 //
+
+/// The number of seconds in a day.
+const ONE_DAY_SECS: u64 = 24 * 60 * 60;
+
+/// The largest number of blocks `n` such that the target time from the block at `tip - n` to the
+/// block at `tip` does not exceed `seconds`, with the block spacing taken per height (75 s from
+/// Blossom, 25 s from NU7 activation). `n` never reaches below genesis.
+fn blocks_in_target_time<P: Parameters>(params: &P, tip: BlockHeight, seconds: u64) -> u32 {
+    // The target time grows monotonically with the depth, so binary search for the deepest
+    // block that still fits.
+    let (mut fits, mut too_deep) = (0u32, u32::from(tip).saturating_add(1));
+    while too_deep - fits > 1 {
+        let depth = fits + (too_deep - fits) / 2;
+        if target_time_between(params, tip - depth, tip).as_secs() <= seconds {
+            fits = depth;
+        } else {
+            too_deep = depth;
+        }
+    }
+    fits
+}
 
 /// `network_id` value for Testnet, accepted by [`parse_network`] and every
 /// `zcashlc_*` FFI that takes a `network_id` parameter.
@@ -4598,7 +4663,7 @@ pub(crate) const NETWORK_ID_REGTEST: u32 = 2;
 /// (`base`, which determines address encoding and `chainName`) combined with per-NU activation heights
 /// ([`LocalNetwork`]) configured at runtime. This is how the SDK connects to a custom-parameter node
 /// (e.g. a modified-mainnet Ironwood backend: `base = Main`, NU6.3 at a custom height). Implements
-/// [`Parameters`] purely by delegation, so it is a drop-in replacement for the concrete `Network`
+/// [`Parameters`] purely by delegation (every network upgrade, NU7 included), so it is a drop-in replacement for the concrete `Network`
 /// everywhere the FFI threads network parameters.
 #[derive(Clone, Copy)]
 pub(crate) enum NetworkParams {
@@ -4669,6 +4734,7 @@ pub extern "C" fn zcashlc_set_custom_network(
     nu6_1: i64,
     nu6_2: i64,
     nu6_3: i64,
+    nu7: i64,
 ) -> bool {
     fn height(value: i64) -> Option<BlockHeight> {
         u32::try_from(value).ok().map(BlockHeight::from_u32)
@@ -4689,6 +4755,7 @@ pub extern "C" fn zcashlc_set_custom_network(
         nu6_1: height(nu6_1),
         nu6_2: height(nu6_2),
         nu6_3: height(nu6_3),
+        nu7: height(nu7),
     };
 
     match CUSTOM_PARAMS.write() {
@@ -4821,11 +4888,69 @@ mod tests {
                 nu6_1: height,
                 nu6_2: height,
                 nu6_3: height,
+                nu7: None,
             },
         };
         assert_eq!(
             anchor_retention_interval(custom),
             TEST_ANCHOR_RETENTION_INTERVAL,
+        );
+    }
+
+    /// The NU7 activation heights `zcash_protocol` defines for mainnet and testnet.
+    const MAINNET_NU7: u32 = 3_543_405;
+    const TESTNET_NU7: u32 = 4_465_026;
+
+    #[test]
+    fn target_block_spacing_drops_to_25_seconds_at_nu7_activation() {
+        for (network_id, nu7) in [
+            (NETWORK_ID_MAINNET, MAINNET_NU7),
+            (NETWORK_ID_TESTNET, TESTNET_NU7),
+        ] {
+            assert_eq!(zcashlc_target_block_spacing(nu7 - 1, network_id), 75);
+            assert_eq!(zcashlc_target_block_spacing(nu7, network_id), 25);
+            assert_eq!(
+                zcashlc_target_block_spacing(nu7 + 1_000_000, network_id),
+                25
+            );
+        }
+        assert_eq!(zcashlc_target_block_spacing(MAINNET_NU7, 99), -1);
+    }
+
+    #[test]
+    fn default_expiry_delta_rises_to_120_blocks_at_nu7_activation() {
+        for (network_id, nu7) in [
+            (NETWORK_ID_MAINNET, MAINNET_NU7),
+            (NETWORK_ID_TESTNET, TESTNET_NU7),
+        ] {
+            assert_eq!(zcashlc_default_tx_expiry_delta(nu7 - 1, network_id), 40);
+            assert_eq!(zcashlc_default_tx_expiry_delta(nu7, network_id), 120);
+        }
+        assert_eq!(zcashlc_default_tx_expiry_delta(MAINNET_NU7, 99), -1);
+    }
+
+    #[test]
+    fn one_day_of_blocks_follows_the_block_spacing() {
+        let mainnet = NetworkParams::Standard(MainNetwork);
+        let nu7 = BlockHeight::from_u32(MAINNET_NU7);
+
+        // Entirely before NU7: 86400 / 75.
+        assert_eq!(blocks_in_target_time(&mainnet, nu7 - 1, ONE_DAY_SECS), 1152);
+        // Entirely after NU7: 86400 / 25.
+        assert_eq!(
+            blocks_in_target_time(&mainnet, nu7 + 10_000, ONE_DAY_SECS),
+            3456
+        );
+        // Straddling activation: the 600 blocks from NU7 activation to the tip take 15000 s, and
+        // the remaining 71400 s hold 952 pre-NU7 blocks.
+        assert_eq!(
+            blocks_in_target_time(&mainnet, nu7 + 599, ONE_DAY_SECS),
+            600 + 952
+        );
+        // Never below genesis.
+        assert_eq!(
+            blocks_in_target_time(&mainnet, BlockHeight::from_u32(10), ONE_DAY_SECS),
+            10
         );
     }
 }

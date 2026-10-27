@@ -466,7 +466,10 @@ mod tests {
         );
 
         unsafe { zcashlc_voting_db_free(db) };
-        assert!(!result.is_null(), "matching seed and planted request must sign");
+        assert!(
+            !result.is_null(),
+            "matching seed and planted request must sign"
+        );
         let bytes = unsafe { (*result).as_slice() }.to_vec();
         unsafe { crate::ffi::zcashlc_free_boxed_slice(result) };
 

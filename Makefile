@@ -137,6 +137,13 @@ test-offline: ## Run the offline tests (no network, no lightwalletd)
 test-scripts: ## Run the release-script unit tests
 	./$(SCRIPTS)/tests/run-tests.sh
 
+# Opt-in verification against the live testnet through testnet.zec.rocks. The
+# suite skips itself unless NU7_TESTNET=1; NU7_TESTNET_SEED (a BIP 39
+# mnemonic) gives it a fundable wallet. testnet-verification.yml runs this.
+.PHONY: test-nu7-testnet
+test-nu7-testnet: ## Run the NU7 live-testnet verification (needs NU7_TESTNET=1)
+	$(SWIFT) test --filter Nu7TestnetTests
+
 .PHONY: test-all
 test-all: ## Run the whole test suite, including networked tests
 	$(SWIFT) test
@@ -146,6 +153,12 @@ test-all: ## Run the whole test suite, including networked tests
 .PHONY: test-rust
 test-rust: ## Run the Rust unit tests
 	cargo test
+
+# The licence, source and ban checks from deny.toml; CI's check_native_licenses
+# job runs exactly this. Needs cargo-deny on the PATH.
+.PHONY: deny-rust
+deny-rust: ## Check the Rust dependency graph's licences, sources and bans
+	$(CARGO) deny check licenses sources bans
 
 .PHONY: lint
 lint: ## Lint the Swift sources with SwiftLint
